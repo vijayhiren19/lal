@@ -1,3 +1,1 @@
-# lal
-Nothing
-first draft version
+Follow the instruction.
