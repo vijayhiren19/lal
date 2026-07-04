@@ -181,6 +181,7 @@ def _normalise_sector(industry):
         if key.lower() in industry.lower():
             return sector
 
+
     # Fallback: clean and use industry as-is (but capped to UNKNOWN)
     cleaned = industry.replace(" ", "_").upper()[:50]
     return "UNKNOWN"

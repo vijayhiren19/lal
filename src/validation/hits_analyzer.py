@@ -9,6 +9,7 @@ Usage (via run_hits.py):
 """
 
 import logging
+import time
 from functools import lru_cache
 
 import pandas as pd
@@ -100,6 +101,7 @@ def compute_hits(start_date, end_date):
     entry_modes = config["entry_modes"]
     targets = config["targets"]
     windows = config["windows"]
+    _t0 = time.perf_counter()
 
     logger.info(
         "Computing hits for picks %s to %s: %d entry modes, %d targets, %d windows",
@@ -326,7 +328,8 @@ def compute_hits(start_date, end_date):
 
     conn.commit()
     conn.close()
-    logger.info("Hit computation complete: %d rows inserted/updated", inserted)
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Hit computation complete: %d rows inserted/updated (%.2fs)", inserted, _elapsed)
 
 
 def analyze_hits(detail_threshold=0):

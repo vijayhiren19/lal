@@ -38,6 +38,12 @@ python -m src.runner --stages score
 
 # Compute hit analysis
 python -m src.validation.run_hits --compute --start-date 2026-05-01 --end-date 2026-06-04
+
+# Start Flask API server (http://127.0.0.1:5000)
+python -m src.api.app
+
+# With custom host/port
+python -m src.api.app --host 0.0.0.0 --port 5001
 ```
 
 ---
@@ -55,9 +61,12 @@ phase1/
 ├── data/                     Cached CSVs (bhavcopy, MTO, eq_mast.csv)
 ├── src/
 │   ├── runner.py             CLI orchestrator
+│   ├── api/                  Flask REST API (stocks, pipeline, meta endpoints)
 │   ├── data_pipeline/        Fetch, enrich, technical indicators
 │   ├── scoring/              V2a scoring formula
 │   └── validation/           Hit analysis
+config/
+│   ├── columns.yaml          Column registry for the API (97 columns)
 ├── build_fno_membership.py   F&O membership data
 ├── build_index_history.py    Index/sector membership
 ├── build_shareholding.py     Shareholding data
@@ -97,6 +106,80 @@ python -c "from db.connection import get_connection; import pandas as pd; print(
 ```
 
 ---
+
+## Flask REST API
+
+The API exposes the pipeline and scoring data via HTTP. Start the dev server:
+
+```bash
+python -m src.api.app --host 0.0.0.0 --port=5000
+```
+
+Endpoints (all under `/api/v1`):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/stocks?date=...` | Flexible stock data query with column/filter/pagination |
+| GET | `/stocks/history?symbol=...` | Full history for a symbol |
+| GET | `/stocks/detail?symbol=...` | Single stock snapshot |
+| GET | `/stocks/search?q=...` | Fuzzy symbol/sector search |
+| GET | `/picks?date=...&limit=20` | Top scoring picks |
+| POST | `/pipeline/run` | Trigger pipeline (async) |
+| GET | `/pipeline/status` | Check pipeline job status |
+| GET | `/pipeline/stages` | List 11 available pipeline stages |
+| GET | `/pipeline/jobs` | List recent pipeline jobs |
+| POST | `/pipeline/build/fno-membership` | Rebuild F&O membership (async) |
+| POST | `/pipeline/build/index-history` | Rebuild index membership (async) |
+| POST | `/pipeline/build/shareholding` | Rebuild shareholding table (async) |
+| POST | `/pipeline/build/equity-master` | Rebuild equity master CSV (async) |
+| POST | `/hits/compute` | Compute hit analysis (async) |
+| GET | `/hits/analyze` | Hit rate summary JSON |
+| GET | `/hits/detail` | Individual pick details |
+| GET | `/columns` | Column registry (97 columns, 10 groups) |
+| GET | `/health` | DB stats, schema version, last data date |
+| GET | `/dates` | Available date ranges per table |
+
+Example queries:
+
+```bash
+# Top 20 picks for a date (CSV export)
+curl "http://127.0.0.1:5000/api/v1/picks?date=2026-06-25&format=csv" -o picks.csv
+
+# Stock universe with specific columns
+curl "http://127.0.0.1:5000/api/v1/stocks?date=2026-06-25&columns=symbol,close_price,overall_score,rank&order_by=rank&order_dir=asc&limit=10"
+
+# Trigger pipeline
+curl -X POST "http://127.0.0.1:5000/api/v1/pipeline/run" -H "Content-Type: application/json" -d "{\"days_back\": 1}"
+
+# Compute hit analysis
+curl -X POST "http://127.0.0.1:5000/api/v1/hits/compute" -H "Content-Type: application/json" -d "{\"start_date\":\"2025-01-01\",\"end_date\":\"2026-07-03\"}"
+
+# Rebuild F&O membership
+curl -X POST "http://127.0.0.1:5000/api/v1/pipeline/build/fno-membership"
+```
+
+### Deployment Flow (Zero to Data)
+
+Tested end-to-end. From a bare database to populated picks via API only:
+
+```bash
+# 1. Start server (auto-creates all 18 tables + stock_universe view)
+python -m src.api.app
+
+# 2. Trigger full pipeline (async — returns job_id immediately)
+curl -X POST "http://127.0.0.1:5000/api/v1/pipeline/run" \
+  -H "Content-Type: application/json" \
+  -d '{"stages":"all","start_date":"2026-06-20","end_date":"2026-06-30"}'
+
+# 3. Poll until status="completed"
+curl "http://127.0.0.1:5000/api/v1/pipeline/status"
+
+# 4. Verify data
+curl "http://127.0.0.1:5000/api/v1/health"
+curl "http://127.0.0.1:5000/api/v1/picks?date=2026-06-30"
+```
+
+Result: 11 stages, ~2m40s for 6 trading days. All 18 tables populated.
 
 ## How to Add a Feature
 

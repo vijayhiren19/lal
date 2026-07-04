@@ -7,6 +7,7 @@ Reads from daily table, writes to momentum table.
 """
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -180,6 +181,7 @@ def run_stage(start_date: str, end_date: str):
     Reads daily OHLCV data, computes momentum indicators per symbol,
     batch upserts into the momentum table.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting momentum stage: %s to %s", start_date, end_date)
 
     conn = get_connection()
@@ -236,7 +238,8 @@ def run_stage(start_date: str, end_date: str):
     conn.commit()
     conn.close()
 
-    logger.info("Completed momentum stage: %d rows upserted", len(result_df))
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Completed momentum stage: %d rows upserted (%.2fs)", len(result_df), _elapsed)
 
 
 def _get(row, col, default=None):

@@ -11,6 +11,7 @@ import io
 import logging
 import zipfile
 from datetime import date, datetime, timedelta
+import time
 
 import numpy as np
 import pandas as pd
@@ -230,6 +231,7 @@ def run_stage(start_date: str = None, end_date: str = None):
     Note: FO UDiFF data is only available for recent 1-2 days via the API.
     Historical dates will have no data to process.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting derivatives stage")
 
     try:
@@ -289,7 +291,8 @@ def run_stage(start_date: str = None, end_date: str = None):
         conn.commit()
         conn.close()
 
-        logger.info("Completed derivatives stage: %d rows upserted", len(df))
+        _elapsed = time.perf_counter() - _t0
+        logger.info("Completed derivatives stage: %d rows upserted (%.2fs)", len(df), _elapsed)
 
     except Exception as e:
         logger.error("Derivatives stage failed: %s", str(e), exc_info=True)

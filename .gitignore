@@ -9,8 +9,11 @@ data/**/*.zip
 data/**/*.DAT
 data/**/*.txt
 data/**/*.log
-
+logs/**
+.playwright-mcp/**
 *.db
+*.db-shm
+*.db-wal
 .opencode/package.json
 .opencode/package-lock.json
 temp_*.py

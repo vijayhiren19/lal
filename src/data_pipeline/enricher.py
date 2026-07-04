@@ -8,6 +8,7 @@ Writes to:
 """
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -108,6 +109,7 @@ def run_stage(start_date: str, end_date: str):
     Reads stage + stage_delivery data, computes wvap, delivery metrics,
     and 5-day closing extremes, writes to daily table.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting enrich stage: %s to %s", start_date, end_date)
     conn = get_connection()
 
@@ -237,9 +239,11 @@ def run_stage(start_date: str, end_date: str):
     conn.commit()
     conn.close()
 
+    _elapsed = time.perf_counter() - _t0
     logger.info(
-        "Completed enrich stage: %d rows upserted to daily",
+        "Completed enrich stage: %d rows upserted to daily (%.2fs)",
         len(daily_rows),
+        _elapsed,
     )
 
 

@@ -654,27 +654,34 @@ Stage names: `fetch`, `equity_master`, `enrich`, `technical`, `price_level`, `mo
 
 ## Daily Workflow
 
+Activate the virtual environment first, then use `python -m` for all commands:
+
 ```bash
+# Activate (Linux / macOS)
+source .venv/bin/activate
+# Activate (Windows)
+# .venv\Scripts\activate
+
 # Full pipeline (after market close)
-.venv\Scripts\python -m src.runner --stages all --days-back 1
+python -m src.runner --stages all --days-back 1
 
 # Run scoring only (if pipeline already ran)
-.venv\Scripts\python -c "from src.scoring.scorer import run_scoring; run_scoring('2026-06-25')"
+python -c "from src.scoring.scorer import run_scoring; run_scoring('2026-06-25')"
 
 # Refresh equity master data
-.venv\Scripts\python -m src.runner --stages equity_master
+python -m src.runner --stages equity_master
 
 # Rebuild F&O membership data
-.venv\Scripts\python build_fno_membership.py
+python build_fno_membership.py
 
 # Rebuild index membership data (sector/Nifty 500)
-.venv\Scripts\python build_index_history.py
+python build_index_history.py
 
 # Rebuild shareholding data
-.venv\Scripts\python build_shareholding.py
+python build_shareholding.py
 
 # Query top picks for a given date
-.venv\Scripts\python -c "
+python -c "
 from db.connection import get_connection
 conn = get_connection()
 df = pd.read_sql('SELECT * FROM scoring_picks WHERE trade_date = \"2026-06-25\" ORDER BY rank', conn)
@@ -682,7 +689,7 @@ print(df)
 "
 
 # Query verification performance
-.venv\Scripts\python -c "
+python -c "
 from db.connection import get_connection
 conn = get_connection()
 df = pd.read_sql('SELECT * FROM scoring_performance ORDER BY pick_date', conn)
@@ -690,9 +697,834 @@ print(f'Avg return: {df.return_pct.mean():.2f}%  Win rate: {(df.return_pct > 0).
 "
 
 # Compute + analyze hit rates
-.venv\Scripts\python -m src.validation.run_hits --compute --start-date 2026-05-01 --end-date 2026-06-04
-.venv\Scripts\python -m src.validation.run_hits --analyze
+python -m src.validation.run_hits --compute --start-date 2026-05-01 --end-date 2026-06-04
+python -m src.validation.run_hits --analyze
 
 # Hits as a pipeline stage
-.venv\Scripts\python -m src.runner --stages hits --start-date 2026-05-01 --end-date 2026-06-04
+python -m src.runner --stages hits --start-date 2026-05-01 --end-date 2026-06-04
+```
+
+---
+
+## Flask REST API
+
+Complete specification for the REST API layer. Exposes the pipeline, scoring results, and stock data via HTTP endpoints.
+
+### API File Structure
+
+```
+src/api/
+├── __init__.py
+├── app.py                Flask factory: create_app(), register blueprints
+├── views.py              CREATE VIEW IF NOT EXISTS stock_universe
+├── routes_stocks.py      /api/v1/stocks, /history, /detail, /search
+├── routes_pipeline.py    /api/v1/pipeline/run, /pipeline/status
+└── routes_meta.py        /api/v1/columns, /api/v1/health
+
+config/
+├── scoring.yaml          (existing)
+└── columns.yaml          NEW — 97 column definitions in 10 groups
+```
+
+### Database View — `stock_universe`
+
+Created during `init_schema()` via `CREATE VIEW IF NOT EXISTS stock_universe`.
+
+Joins all major tables on `(exchange, trade_date, symbol)` with LEFT JOIN.
+
+**Column order** (most useful → specialized):
+
+| Order | Group | Columns |
+|-------|-------|---------|
+| 1 | Identity | `exchange`, `trade_date`, `symbol`, `sector`, `industry`, `isin` |
+| 2 | Price | `open_price`, `high_price`, `low_price`, `close_price`, `previous_close`, `traded_volume`, `traded_value`, `day_return_pct`, `wvap_price` |
+| 3 | Delivery | `delivery_volume`, `delivery_value`, `delivery_pct`, `delivery_qty_20d_avg`, `delivery_pct_trend` |
+| 4 | Technical | `sma_20`, `sma_50`, `sma_100`, `sma_200`, `ema_9`, `ema_20`, `ema_50`, `price_vs_sma20_pct`, `golden_cross`, `ema20_gt_ema50`, `price_gt_sma200`, `trend_stage`, `trend_score`, `trend_strength` |
+| 5 | Price Level | `week52_high`, `week52_low`, `pct_from_52wk_high`, `near_52wk_high_flag`, `week4_high`, `breakout_flag`, `pivot_p`, `pivot_r1`, `pivot_s1` |
+| 6 | Momentum | `rsi_14`, `macd`, `macd_signal`, `macd_histogram`, `macd_crossover`, `stoch_k`, `stoch_d`, `adx_14`, `mfi_14`, `cci_20`, `rsi_9`, `williams_r_14`, `stoch_signal`, `momentum_score`, `decay_factor` |
+| 7 | Volatility | `atr_14`, `atr_pct`, `bb_upper`, `bb_middle`, `bb_lower`, `bb_width`, `bb_squeeze`, `keltner_upper`, `keltner_lower`, `historical_vol_20d` |
+| 8 | Averages | `close_avg_21d`, `close_avg_63d`, `close_avg_126d`, `close_avg_252d`, `volume_avg_21d`, `volume_avg_63d`, `volume_avg_126d`, `rsi_avg_21d`, `delivery_pct_avg_21d`, `volatility_avg_21d`, `vol_5d_avg`, `vol_10d_avg`, `vol_20d_avg`, `vol_ratio`, `vol_breakout_up`, `volume_score` |
+| 9 | Derivatives | `basis_pct`, `oi_change_pct` |
+| 10 | Scoring | `overall_score`, `rank`, `percentile`, `comp_momentum_score`, `value_score`, `quality_score`, `technical_strength`, `volume_liquidity`, `institutional_score`, `fno_score`, `nifty500_member` |
+
+All values from `scoring_result` columns are prefixed with `comp_` to avoid naming collisions with other pipeline stage columns.
+
+**Full SQL:**
+```sql
+CREATE VIEW IF NOT EXISTS stock_universe AS
+SELECT
+    d.exchange,
+    d.trade_date,
+    d.symbol,
+    d.open_price,
+    d.high_price,
+    d.low_price,
+    d.close_price,
+    d.previous_close,
+    d.traded_volume,
+    d.traded_value,
+    d.day_return_pct,
+    d.wvap_price,
+    d.delivery_volume,
+    d.delivery_value,
+    d.delivery_pct,
+    d.delivery_qty_20d_avg,
+    d.delivery_pct_trend,
+    d.isin,
+    t.sma_20,
+    t.sma_50,
+    t.sma_100,
+    t.sma_200,
+    t.ema_9,
+    t.ema_20,
+    t.ema_50,
+    t.price_vs_sma20_pct,
+    t.golden_cross,
+    t.ema20_gt_ema50,
+    t.price_gt_sma200,
+    t.trend_stage,
+    t.trend_score,
+    t.trend_strength,
+    pl.week52_high,
+    pl.week52_low,
+    pl.pct_from_52wk_high,
+    pl.near_52wk_high_flag,
+    pl.week4_high,
+    pl.breakout_flag,
+    pl.pivot_p,
+    pl.pivot_r1,
+    pl.pivot_s1,
+    m.rsi_14,
+    m.macd,
+    m.macd_signal,
+    m.macd_histogram,
+    m.macd_crossover,
+    m.stoch_k,
+    m.stoch_d,
+    m.adx_14,
+    m.mfi_14,
+    m.cci_20,
+    m.rsi_9,
+    m.williams_r_14,
+    m.stoch_signal,
+    m.momentum_score                              AS comp_momentum_score,
+    m.decay_factor,
+    v.atr_14,
+    v.atr_pct,
+    v.bb_upper,
+    v.bb_middle,
+    v.bb_lower,
+    v.bb_width,
+    v.bb_squeeze,
+    v.keltner_upper,
+    v.keltner_lower,
+    v.historical_vol_20d,
+    a.close_avg_21d,
+    a.close_avg_63d,
+    a.close_avg_126d,
+    a.close_avg_252d,
+    a.volume_avg_21d,
+    a.volume_avg_63d,
+    a.volume_avg_126d,
+    a.rsi_avg_21d,
+    a.delivery_pct_avg_21d,
+    a.volatility_avg_21d,
+    a.vol_5d_avg,
+    a.vol_10d_avg,
+    a.vol_20d_avg,
+    a.vol_ratio,
+    a.vol_breakout_up,
+    a.volume_score,
+    f.basis_pct,
+    f.oi_change_pct,
+    sr.overall_score,
+    sr.rank,
+    sr.percentile,
+    sr.momentum_score                             AS comp_momentum_score_sr,
+    sr.value_score,
+    sr.quality_score,
+    sr.technical_strength,
+    sr.volume_liquidity,
+    sr.institutional_score,
+    sr.fno_score,
+    sr.nifty500_member,
+    em.sector,
+    em.industry
+FROM daily d
+LEFT JOIN technical t
+    ON d.exchange = t.exchange AND d.trade_date = t.trade_date AND d.symbol = t.symbol
+LEFT JOIN price_level pl
+    ON d.exchange = pl.exchange AND d.trade_date = pl.trade_date AND d.symbol = pl.symbol
+LEFT JOIN momentum m
+    ON d.exchange = m.exchange AND d.trade_date = m.trade_date AND d.symbol = m.symbol
+LEFT JOIN volatility v
+    ON d.exchange = v.exchange AND d.trade_date = v.trade_date AND d.symbol = v.symbol
+LEFT JOIN averages a
+    ON d.exchange = a.exchange AND d.trade_date = a.trade_date AND d.symbol = a.symbol
+LEFT JOIN futures_data f
+    ON d.trade_date = f.trade_date AND d.symbol = f.symbol
+LEFT JOIN scoring_result sr
+    ON d.exchange = sr.exchange AND d.trade_date = sr.trade_date AND d.symbol = sr.symbol
+LEFT JOIN equity_master em
+    ON d.symbol = em.symbol
+```
+
+> **Note on `comp_momentum_score` vs `comp_momentum_score_sr`:** The `momentum` table stores a `momentum_score` (RSI+MACD+Stoch composite from the momentum pipeline stage). The `scoring_result` table also stores a `momentum_score` (contrarian entry component from the V2a formula). The view renames both to `comp_momentum_score` and `comp_momentum_score_sr` respectively so the caller can distinguish.
+
+### Column Registry — `config/columns.yaml`
+
+Single source of truth for all queryable columns. Defines name, group, type for each column in `stock_universe`. Loaded once at API startup.
+
+```yaml
+# config/columns.yaml
+# Column registry for the Flask REST API.
+# Each entry defines a column in the stock_universe view.
+# Groups: identity, price, delivery, technical, price_level, momentum,
+#         volatility, averages, derivatives, scoring
+
+columns:
+  - name: symbol
+    group: identity
+    type: TEXT
+  - name: trade_date
+    group: identity
+    type: TEXT
+  - name: sector
+    group: identity
+    type: TEXT
+  - name: industry
+    group: identity
+    type: TEXT
+  - name: exchange
+    group: identity
+    type: TEXT
+  - name: isin
+    group: identity
+    type: TEXT
+  - name: open_price
+    group: price
+    type: REAL
+  - name: high_price
+    group: price
+    type: REAL
+  - name: low_price
+    group: price
+    type: REAL
+  - name: close_price
+    group: price
+    type: REAL
+  - name: previous_close
+    group: price
+    type: REAL
+  - name: traded_volume
+    group: price
+    type: INTEGER
+  - name: traded_value
+    group: price
+    type: REAL
+  - name: day_return_pct
+    group: price
+    type: REAL
+  - name: wvap_price
+    group: price
+    type: REAL
+  - name: delivery_volume
+    group: delivery
+    type: INTEGER
+  - name: delivery_value
+    group: delivery
+    type: REAL
+  - name: delivery_pct
+    group: delivery
+    type: REAL
+  - name: delivery_qty_20d_avg
+    group: delivery
+    type: REAL
+  - name: delivery_pct_trend
+    group: delivery
+    type: REAL
+  - name: sma_20
+    group: technical
+    type: REAL
+  - name: sma_50
+    group: technical
+    type: REAL
+  - name: sma_100
+    group: technical
+    type: REAL
+  - name: sma_200
+    group: technical
+    type: REAL
+  - name: ema_9
+    group: technical
+    type: REAL
+  - name: ema_20
+    group: technical
+    type: REAL
+  - name: ema_50
+    group: technical
+    type: REAL
+  - name: price_vs_sma20_pct
+    group: technical
+    type: REAL
+  - name: golden_cross
+    group: technical
+    type: INTEGER
+  - name: ema20_gt_ema50
+    group: technical
+    type: INTEGER
+  - name: price_gt_sma200
+    group: technical
+    type: INTEGER
+  - name: trend_stage
+    group: technical
+    type: TEXT
+  - name: trend_score
+    group: technical
+    type: REAL
+  - name: trend_strength
+    group: technical
+    type: REAL
+  - name: week52_high
+    group: price_level
+    type: REAL
+  - name: week52_low
+    group: price_level
+    type: REAL
+  - name: pct_from_52wk_high
+    group: price_level
+    type: REAL
+  - name: near_52wk_high_flag
+    group: price_level
+    type: INTEGER
+  - name: week4_high
+    group: price_level
+    type: REAL
+  - name: breakout_flag
+    group: price_level
+    type: INTEGER
+  - name: pivot_p
+    group: price_level
+    type: REAL
+  - name: pivot_r1
+    group: price_level
+    type: REAL
+  - name: pivot_s1
+    group: price_level
+    type: REAL
+  - name: rsi_14
+    group: momentum
+    type: REAL
+  - name: macd
+    group: momentum
+    type: REAL
+  - name: macd_signal
+    group: momentum
+    type: REAL
+  - name: macd_histogram
+    group: momentum
+    type: REAL
+  - name: macd_crossover
+    group: momentum
+    type: INTEGER
+  - name: stoch_k
+    group: momentum
+    type: REAL
+  - name: stoch_d
+    group: momentum
+    type: REAL
+  - name: adx_14
+    group: momentum
+    type: REAL
+  - name: mfi_14
+    group: momentum
+    type: REAL
+  - name: cci_20
+    group: momentum
+    type: REAL
+  - name: rsi_9
+    group: momentum
+    type: REAL
+  - name: williams_r_14
+    group: momentum
+    type: REAL
+  - name: stoch_signal
+    group: momentum
+    type: REAL
+  - name: comp_momentum_score
+    group: momentum
+    type: REAL
+  - name: decay_factor
+    group: momentum
+    type: REAL
+  - name: atr_14
+    group: volatility
+    type: REAL
+  - name: atr_pct
+    group: volatility
+    type: REAL
+  - name: bb_upper
+    group: volatility
+    type: REAL
+  - name: bb_middle
+    group: volatility
+    type: REAL
+  - name: bb_lower
+    group: volatility
+    type: REAL
+  - name: bb_width
+    group: volatility
+    type: REAL
+  - name: bb_squeeze
+    group: volatility
+    type: INTEGER
+  - name: keltner_upper
+    group: volatility
+    type: REAL
+  - name: keltner_lower
+    group: volatility
+    type: REAL
+  - name: historical_vol_20d
+    group: volatility
+    type: REAL
+  - name: close_avg_21d
+    group: averages
+    type: REAL
+  - name: close_avg_63d
+    group: averages
+    type: REAL
+  - name: close_avg_126d
+    group: averages
+    type: REAL
+  - name: close_avg_252d
+    group: averages
+    type: REAL
+  - name: volume_avg_21d
+    group: averages
+    type: REAL
+  - name: volume_avg_63d
+    group: averages
+    type: REAL
+  - name: volume_avg_126d
+    group: averages
+    type: REAL
+  - name: rsi_avg_21d
+    group: averages
+    type: REAL
+  - name: delivery_pct_avg_21d
+    group: averages
+    type: REAL
+  - name: volatility_avg_21d
+    group: averages
+    type: REAL
+  - name: vol_5d_avg
+    group: averages
+    type: REAL
+  - name: vol_10d_avg
+    group: averages
+    type: REAL
+  - name: vol_20d_avg
+    group: averages
+    type: REAL
+  - name: vol_ratio
+    group: averages
+    type: REAL
+  - name: vol_breakout_up
+    group: averages
+    type: INTEGER
+  - name: volume_score
+    group: averages
+    type: REAL
+  - name: basis_pct
+    group: derivatives
+    type: REAL
+  - name: oi_change_pct
+    group: derivatives
+    type: REAL
+  - name: overall_score
+    group: scoring
+    type: REAL
+  - name: rank
+    group: scoring
+    type: INTEGER
+  - name: percentile
+    group: scoring
+    type: REAL
+  - name: comp_momentum_score_sr
+    group: scoring
+    type: REAL
+  - name: value_score
+    group: scoring
+    type: REAL
+  - name: quality_score
+    group: scoring
+    type: REAL
+  - name: technical_strength
+    group: scoring
+    type: REAL
+  - name: volume_liquidity
+    group: scoring
+    type: REAL
+  - name: institutional_score
+    group: scoring
+    type: REAL
+  - name: fno_score
+    group: scoring
+    type: REAL
+  - name: nifty500_member
+    group: scoring
+    type: INTEGER
+```
+
+### Endpoints
+
+#### `GET /api/v1/stocks` — Flexible stock data query
+
+Query from `stock_universe` with dynamic column selection, filtering, ordering, pagination.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date` | string | — | Trade date `YYYY-MM-DD` **(required)** |
+| `symbol` | string | — | Filter by symbol |
+| `sector` | string | — | Filter by sector name |
+| `columns` | string | all | Comma-separated column names (order preserved) |
+| `fields` | string | — | Repeated param, appended after `columns` |
+| `order_by` | string | `rank` | Column to sort by |
+| `order_dir` | string | `asc` | `asc` or `desc` |
+| `limit` | int | `100` | Max rows (cap at 1000) |
+| `offset` | int | `0` | Pagination offset |
+| `min_score` | float | — | `overall_score >= min_score` filter |
+| `format` | string | `json` | `json` or `csv` |
+
+**Two field selection methods (coexist):**
+```
+# Method 1 — comma-separated (defines order)
+GET /api/v1/stocks?date=2026-06-25&columns=symbol,close_price,overall_score,rank&order_by=rank&order_dir=asc&limit=20
+
+# Method 2 — repeated fields param (appended to columns)
+GET /api/v1/stocks?date=2026-06-25&fields=symbol&fields=close_price&fields=overall_score
+```
+
+If neither `columns` nor `fields` is provided, all columns are returned in view order.
+
+If `columns` is provided, it defines the order and selection. If `fields` is also present, those are appended after the `columns` list (no duplicates).
+
+**Column name validation:** Unknown column names return `400 Bad Request` with the list of invalid names.
+
+**CSV output:** Sets `Content-Type: text/csv` and `Content-Disposition: attachment; filename="stocks_{date}.csv"`.
+
+#### `GET /api/v1/stocks/history` — Full history for a symbol
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `symbol` | string | — | Stock symbol **(required)** |
+| `start_date` | string | — | Start date `YYYY-MM-DD` |
+| `end_date` | string | — | End date `YYYY-MM-DD` |
+| `columns` | string | all | Comma-separated column selection |
+| `fields` | string | — | Repeated field params |
+| `format` | string | `json` | `json` or `csv` |
+
+If no date range given, returns all available history for the symbol.
+
+#### `GET /api/v1/stocks/detail` — Single stock snapshot
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `symbol` | string | — | Stock symbol **(required)** |
+| `date` | string | latest | Trade date |
+
+Returns one row with all columns — the full stock_universe for that symbol+date.
+
+#### `GET /api/v1/stocks/search` — Fuzzy search
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `q` | string | — | Search query **(required)** |
+| `date` | string | latest | Trade date for data context |
+
+Performs `LIKE '%q%'` search on `symbol`, `sector`, and `industry` columns (from `equity_master`). Returns deduplicated list of matching symbols with their latest available data row.
+
+#### `GET /api/v1/picks` — Top scoring picks
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `date` | string | latest | Trade date |
+| `columns` | string | all | Column selection |
+| `limit` | int | `20` | Number of picks |
+| `format` | string | `json` | `json` or `csv` |
+
+Queries `scoring_picks` joined with `stock_universe` on `(trade_date, symbol)`.
+
+#### `POST /api/v1/pipeline/run` — Trigger pipeline (async)
+
+Accepts JSON body. Returns immediately with a `job_id`. Pipeline runs in background thread.
+
+**Request body:**
+```json
+{
+  "stages": "all",
+  "start_date": "2026-06-25",
+  "end_date": "2026-06-26",
+  "days_back": 1
+}
+```
+
+All fields optional (defaults match `runner.py` CLI semantics — default stages=all, end_date=today, start_date=5 days back).
+
+**Response (202 Accepted):**
+```json
+{
+  "job_id": "pipeline_20260704_123456",
+  "status": "pending",
+  "message": "Pipeline queued"
+}
+```
+
+**Concurrency:** Only one pipeline run at a time. If a job is already `running`, returns `409 Conflict`.
+
+#### `GET /api/v1/pipeline/status` — Check job status
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `job_id` | string | latest | Specific job ID, or omit for latest |
+
+Returns the `pipeline_jobs` record.
+
+**Response:**
+```json
+{
+  "job_id": "pipeline_20260704_123456",
+  "stages": "all",
+  "start_date": "2026-06-25",
+  "end_date": "2026-06-26",
+  "status": "running",
+  "started_at": "2026-07-04T12:34:56",
+  "completed_at": null,
+  "error_log": null
+}
+```
+
+#### `GET /api/v1/columns` — Column discovery
+
+Returns the full column registry grouped by `group`. Each entry includes `name`, `group`, `type`.
+
+#### `GET /api/v1/health` — Health check
+
+Returns:
+```json
+{
+  "status": "ok",
+  "db_size_mb": 156.2,
+  "schema_version": "v1.17",
+  "tables": { "daily": 320000, "scoring_result": 120000, ... },
+  "last_data_date": "2026-07-03",
+  "last_scored_date": "2026-07-03"
+}
+```
+
+#### `GET /api/v1/pipeline/stages` — List available stages
+
+Returns the 11 available pipeline stage names (`fetch`, `equity_master`, `enrich`, `technical`, `price_level`, `momentum`, `volatility`, `averages`, `derivatives`, `score`, `hits`).
+
+#### `GET /api/v1/pipeline/jobs` — List recent pipeline jobs
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | int | `10` | Max rows (cap at 100) |
+| `status` | string | — | Filter by status (`pending`/`running`/`completed`/`failed`) |
+
+Returns `{ "jobs": [...], "count": N }`.
+
+#### `POST /api/v1/pipeline/build/fno-membership` — Rebuild F&O membership (async)
+
+Downloads `fno_membership_history.csv` from GitHub and populates the `fno_membership` table. Returns `202 Accepted` with `job_id`. Uses `pipeline_jobs` table for status tracking.
+
+#### `POST /api/v1/pipeline/build/index-history` — Rebuild index membership (async)
+
+Downloads `index_membership_history.csv` from GitHub and populates the `index_membership` table. Same async pattern.
+
+#### `POST /api/v1/pipeline/build/shareholding` — Rebuild shareholding table (async)
+
+Downloads shareholding flat CSV from GitHub and populates the `shareholding` table. Same async pattern.
+
+#### `POST /api/v1/pipeline/build/equity-master` — Rebuild equity master CSV (async)
+
+Downloads `EQ_MAST.csv` from NSE and writes `data/eq_mast.csv`. Same async pattern.
+
+#### `POST /api/v1/hits/compute` — Compute hit analysis (async)
+
+**Request body (JSON):**
+```json
+{
+  "start_date": "2025-01-01",
+  "end_date": "2026-07-03"
+}
+```
+
+Both fields required. Computes forward-return hits for all `scoring_picks` in the range and writes to `predicted_stock`. Returns `202 Accepted` with `job_id`. On completion, `pipeline_jobs.error_log` contains the captured log output.
+
+#### `GET /api/v1/hits/analyze` — Hit rate summary
+
+Returns aggregate hit rates as JSON:
+```json
+{
+  "total_picks": 7359,
+  "summary": [
+    { "level": 0, "label": "None", "count": 5692, "pct": 77.35 },
+    { "level": 1, "label": "Tg1", "count": 95, "pct": 1.29 }
+  ],
+  "any_hits": { "count": 1667, "pct": 22.65 },
+  "breakdown": [
+    { "window_days": 5, "target": "Tg1", "target_pct": 4, "picks": 7359, "hits": 1667, "hit_pct": 22.65 }
+  ]
+}
+```
+
+#### `GET /api/v1/hits/detail` — Individual hit details
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `min_hit` | int | `1` | Minimum `target_hit` level (0=none, 1=tg1, 2=tg2, 3=tg3) |
+| `limit` | int | `50` | Max rows (cap at 500) |
+| `format` | string | `json` | `json` or `csv` |
+
+Returns `{ "hits": [...], "count": N }` with full details per pick (entry_price, tg1_price, tg1_date, tg1_high, etc.).
+
+#### `GET /api/v1/dates` — Available date ranges
+
+Returns min/max `trade_date` (or `pick_date` for `predicted_stock`/`scoring_performance`) for each time-series table:
+```json
+{
+  "daily": { "date_column": "trade_date", "min_date": "2025-01-01", "max_date": "2026-07-03", "row_count": 823962 },
+  "predicted_stock": { "date_column": "pick_date", "min_date": "2025-01-01", "max_date": "2026-07-02", "row_count": 7359 }
+}
+```
+
+### Pipeline Jobs Table
+
+Created in `init_schema()` alongside other tables:
+
+```sql
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    job_id      TEXT PRIMARY KEY,
+    stages      TEXT NOT NULL,
+    start_date  TEXT,
+    end_date    TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    started_at  TEXT,
+    completed_at TEXT,
+    error_log   TEXT
+)
+```
+
+Status values: `pending` → `running` → `completed` / `failed`.
+
+### Async Pipeline Execution Mechanism
+
+1. `POST /pipeline/run` receives request → generates `job_id` (`pipeline_YYYYMMDD_HHMMSS_ffffff`) with microsecond precision → inserts `pipeline_jobs` row with `status='pending'`
+2. Checks if any existing job has `status IN ('pending', 'running')` → if so, returns `409`
+3. Starts a `threading.Thread` target function that:
+   - Updates job to `status='running'`, `started_at = now`
+   - Adds a `logging.StreamHandler` with `io.StringIO` to the "runner" logger to capture log output
+   - Calls `runner.main()` with parsed args
+   - On success: updates to `status='completed'`, `completed_at = now`, stores captured logs in `error_log`
+   - On failure: updates to `status='failed'`, `completed_at = now`, stores exception traceback + captured logs in `error_log`
+4. Returns `202 Accepted` with the `job_id` immediately
+
+### CLI for Running the API
+
+```bash
+# Standalone Flask dev server
+python -m src.api.app
+
+# With optional host/port
+python -m src.api.app --host 0.0.0.0 --port 5000
+```
+
+Default: `127.0.0.1:5000`, debug mode on for development.
+
+### Deployment Flow (Tested End-to-End)
+
+The pipeline has been verified to work from a bare database (zero pre-existing data) entirely via REST API calls.
+
+**Test procedure:**
+1. Back up existing DB (`mydb1.db` → `mydb1.db.bak`)
+2. Start Flask server (`python -m src.api.app`)
+3. Server auto-creates fresh DB with all 18 tables + `stock_universe` view via `init_schema()`
+4. `POST /api/v1/pipeline/run` with `{"stages":"all","start_date":"2026-06-20","end_date":"2026-06-30"}`
+5. Pipeline runs all 11 stages sequentially: `fetch` → `equity_master` → `enrich` → `technical` → `price_level` → `momentum` → `volatility` → `averages` → `derivatives` → `score` → `hits`
+6. Poll `GET /api/v1/pipeline/status` until `status=completed`
+7. Verify data via `GET /api/v1/health` (table counts), `GET /api/v1/dates` (date ranges), `GET /api/v1/picks` (scoring picks)
+
+**Test results (6 trading days, 2026-06-20 to 2026-06-30):**
+| Stage | Rows | Time |
+|-------|------|------|
+| fetch | 14,454 stage + 14,454 delivery | 5s |
+| equity_master | 2,381 | <1s |
+| enrich | 14,454 daily | 10s |
+| technical | 14,454 | 38s |
+| price_level | 14,454 | 25s |
+| momentum | 14,454 | 18s |
+| volatility | 14,454 | 12s |
+| averages | 14,454 | 38s |
+| derivatives | 210 futures | 3s |
+| score | 6 dates, ~1,450 scored avg | 2s |
+| hits | 164 predicted_stock | <1s |
+| **Total** | **11 stages** | **2m40s** |
+
+After completion, all 18 tables are populated with data, scoring picks are available for each trading date, and hit analysis is stored.
+
+**Data integrity verification:** Rows were deleted via SQLite for a specific date (`DELETE FROM scoring_result WHERE trade_date='2026-06-30'`), then re-scored via the API. The same 1,419 scoring results and 20 picks were re-inserted with identical scores.
+
+### Flask App Factory — `src/api/app.py`
+
+```python
+def create_app():
+    app = Flask(__name__)
+    app.config.from_mapping(
+        DEBUG=True,
+        COLUMNS_CONFIG=load_columns_config(),
+    )
+    app.register_blueprint(stocks_bp, url_prefix='/api/v1')
+    app.register_blueprint(pipeline_bp, url_prefix='/api/v1')
+    app.register_blueprint(meta_bp, url_prefix='/api/v1')
+    return app
+```
+
+Three blueprints registered under `/api/v1`:
+- `stocks_bp` — `/stocks`, `/stocks/history`, `/stocks/detail`, `/stocks/search`, `/picks`
+- `pipeline_bp` — `/pipeline/run`, `/pipeline/status`, `/pipeline/stages`, `/pipeline/jobs`, `/pipeline/build/*`, `/hits/*`
+- `meta_bp` — `/columns`, `/health`, `/dates`
+
+### Pipeline Runner Integration
+
+The API calls the same `src.runner.main()` function used by the CLI. The runner already has a clean `main(argv=None)` interface that accepts CLI-style args. The API constructs the argv list from the request params:
+
+```python
+argv = ["--stages", stages]
+if start_date:
+    argv += ["--start-date", start_date]
+if end_date:
+    argv += ["--end-date", end_date]
+if days_back:
+    argv += ["--days-back", str(days_back)]
+runner.main(argv)
+```
+
+`init_schema()` is called inside `runner.main()`, so it's safe to run.
+
+### Implementation Conventions
+
+- `columns.yaml` is loaded once at app startup via `create_app()` and stored in `app.config['COLUMNS_CONFIG']`
+- The `stock_universe` view is created in `init_schema()` (in `db/connection.py`) by importing and calling `create_stock_universe_view(conn)`
+- All numeric values from the API are serialized as JSON numbers (not strings)
+- `NaN` / `None` values are serialized as `null` in JSON
+- Query building uses parameterized SQL to prevent injection
+- Column validation checks against the loaded column registry before building SQL
+- CSV export uses Python's `csv` module with `DictWriter`
+- Pipeline job_id generation uses microsecond precision (`%f` in strftime) to avoid collisions
+- Pipeline concurrency check looks for both `pending` AND `running` statuses (not just `running`), preventing race conditions between job insertion and thread startup
+- Pipeline log capture uses `logging.StreamHandler` with `io.StringIO` attached to the `runner` logger (not sys.stdout/stderr redirection, which doesn't work with the logging module's stream handler) — captured output is stored in `pipeline_jobs.error_log` on both success and failure
+- Pipeline background threads are daemon threads (`daemon=True`) — they are killed when the main process exits
+- The `stock_universe` view joins on `(exchange, trade_date, symbol)` for all tables except `equity_master` (joined on `symbol` only) and `futures_data` (joined on `(trade_date, symbol)` — no exchange column)
 ```

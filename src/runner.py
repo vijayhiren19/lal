@@ -9,9 +9,11 @@ Usage:
 import argparse
 import logging
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, date
 
+from config import ROOT_DIR
 from db.connection import init_schema, get_connection
 
 logging.basicConfig(
@@ -19,6 +21,21 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("runner")
+
+
+def _setup_file_logging():
+    """Add a file handler to the runner logger, writing to logs/pipeline_*.log."""
+    log_dir = ROOT_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    fh = logging.FileHandler(str(log_file), encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    logging.getLogger("runner").addHandler(fh)
+    logger.info("File logging enabled: %s", log_file)
+    return log_file
 
 STAGE_ORDER = [
     "fetch",
@@ -81,115 +98,72 @@ def _resolve_date_range(args):
 
 def _run_fetch(start, end, from_disk_only):
     """Run the fetch stage."""
-    logger.info("=== Stage: fetch ===")
+    logger.info("=== Stage START: fetch ===")
+    _t0 = time.perf_counter()
     try:
         from src.data_pipeline.fetcher import load_historical_data
 
         load_historical_data(start, end, from_disk_only)
+        _elapsed = time.perf_counter() - _t0
+        logger.info("=== Stage END: fetch (%.2fs) ===", _elapsed)
     except ImportError as e:
         logger.error("fetch module not available: %s", e)
         raise
 
 
-def _run_equity_master(start, end):
-    """Run the equity_master stage."""
-    logger.info("=== Stage: equity_master ===")
+def _run_stage_timed(name, start, end, module_path, stage_fn=None):
+    """Run a stage with START/END timing log."""
+    logger.info("=== Stage START: %s ===", name)
+    _t0 = time.perf_counter()
     try:
-        from src.data_pipeline.equity_master import run_stage
-
-        run_stage(start, end)
+        if stage_fn is None:
+            import importlib
+            mod = importlib.import_module(module_path)
+            stage_fn = mod.run_stage
+        stage_fn(start, end)
+        _elapsed = time.perf_counter() - _t0
+        logger.info("=== Stage END: %s (%.2fs) ===", name, _elapsed)
     except ImportError as e:
-        logger.error("equity_master module not available: %s", e)
+        logger.error("%s module not available: %s", name, e)
         raise
+
+
+def _run_equity_master(start, end):
+    _run_stage_timed("equity_master", start, end, "src.data_pipeline.equity_master")
 
 
 def _run_enrich(start, end):
-    """Run the enrich stage."""
-    logger.info("=== Stage: enrich ===")
-    try:
-        from src.data_pipeline.enricher import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("enrich module not available: %s", e)
-        raise
+    _run_stage_timed("enrich", start, end, "src.data_pipeline.enricher")
 
 
 def _run_technical(start, end):
-    """Run the technical stage."""
-    logger.info("=== Stage: technical ===")
-    try:
-        from src.data_pipeline.technical import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("technical module not available: %s", e)
-        raise
+    _run_stage_timed("technical", start, end, "src.data_pipeline.technical")
 
 
 def _run_price_level(start, end):
-    """Run the price_level stage."""
-    logger.info("=== Stage: price_level ===")
-    try:
-        from src.data_pipeline.price_level import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("price_level module not available: %s", e)
-        raise
+    _run_stage_timed("price_level", start, end, "src.data_pipeline.price_level")
 
 
 def _run_momentum(start, end):
-    """Run the momentum stage."""
-    logger.info("=== Stage: momentum ===")
-    try:
-        from src.data_pipeline.momentum import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("momentum module not available: %s", e)
-        raise
+    _run_stage_timed("momentum", start, end, "src.data_pipeline.momentum")
 
 
 def _run_volatility(start, end):
-    """Run the volatility stage."""
-    logger.info("=== Stage: volatility ===")
-    try:
-        from src.data_pipeline.volatility import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("volatility module not available: %s", e)
-        raise
+    _run_stage_timed("volatility", start, end, "src.data_pipeline.volatility")
 
 
 def _run_averages(start, end):
-    """Run the averages stage."""
-    logger.info("=== Stage: averages ===")
-    try:
-        from src.data_pipeline.averages import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("averages module not available: %s", e)
-        raise
+    _run_stage_timed("averages", start, end, "src.data_pipeline.averages")
 
 
 def _run_derivatives(start, end):
-    """Run the derivatives stage."""
-    logger.info("=== Stage: derivatives ===")
-    try:
-        from src.data_pipeline.derivatives import run_stage
-
-        run_stage(start, end)
-    except ImportError as e:
-        logger.error("derivatives module not available: %s", e)
-        raise
+    _run_stage_timed("derivatives", start, end, "src.data_pipeline.derivatives")
 
 
 def _run_score(start, end):
     """Run the scoring stage — threaded per-date with ThreadPoolExecutor(max_workers=4)."""
-    logger.info("=== Stage: score ===")
+    logger.info("=== Stage START: score ===")
+    _t0 = time.perf_counter()
     try:
         from src.scoring.scorer import run_scoring
     except ImportError as e:
@@ -220,21 +194,23 @@ def _run_score(start, end):
                 logger.error("Scoring failed for %s: %s", d, exc)
                 failures += 1
 
+    _elapsed = time.perf_counter() - _t0
     logger.info(
-        "Scoring complete: %d succeeded, %d failed out of %d",
-        successes,
-        failures,
-        len(dates),
+        "=== Stage END: score (%.2fs) — %d succeeded, %d failed out of %d",
+        _elapsed, successes, failures, len(dates),
     )
 
 
 def _run_hits(start, end):
     """Run the hits (validation) stage."""
-    logger.info("=== Stage: hits ===")
+    logger.info("=== Stage START: hits ===")
+    _t0 = time.perf_counter()
     try:
         from src.validation.hits_analyzer import compute_hits
 
         compute_hits(start, end)
+        _elapsed = time.perf_counter() - _t0
+        logger.info("=== Stage END: hits (%.2fs) ===", _elapsed)
     except ImportError as e:
         logger.error("hits module not available: %s", e)
         raise
@@ -334,13 +310,17 @@ def main(argv=None):
     args = _parse_args(argv)
     start, end = _resolve_date_range(args)
 
+    # Enable file logging
+    log_file = _setup_file_logging()
+
     logger.info(
-        "Pipeline start: stages=%s, range=%s to %s, from_disk_only=%s",
+        "=== PIPELINE START: stages=%s, range=%s to %s, from_disk_only=%s ===",
         args.stages,
         start,
         end,
         args.from_disk_only,
     )
+    _pipeline_t0 = time.perf_counter()
 
     # Initialize schema before any stage runs
     logger.info("Initialising database schema…")
@@ -363,7 +343,11 @@ def main(argv=None):
             # All other stages take (start, end)
             STAGE_DISPATCH[stage_name](start, end)
 
-    logger.info("Pipeline complete.")
+    _pipeline_elapsed = time.perf_counter() - _pipeline_t0
+    logger.info(
+        "=== PIPELINE COMPLETE (%.2fs) — log: %s ===",
+        _pipeline_elapsed, log_file,
+    )
 
 
 if __name__ == "__main__":

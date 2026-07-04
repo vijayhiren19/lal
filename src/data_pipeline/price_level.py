@@ -7,6 +7,7 @@ Reads from daily table, writes to price_level table.
 """
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -123,6 +124,7 @@ def run_stage(start_date: str, end_date: str):
     Reads daily data, computes rolling highs/lows, pivots, and
     breakout signals per symbol. Batch upserts into price_level table.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting price_level stage: %s to %s", start_date, end_date)
 
     conn = get_connection()
@@ -181,7 +183,8 @@ def run_stage(start_date: str, end_date: str):
     conn.commit()
     conn.close()
 
-    logger.info("Completed price_level stage: %d rows upserted", len(result_df))
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Completed price_level stage: %d rows upserted (%.2fs)", len(result_df), _elapsed)
 
 
 def _get(row, col, default=None):

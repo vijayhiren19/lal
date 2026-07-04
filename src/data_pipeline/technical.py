@@ -7,6 +7,7 @@ Reads from daily table, writes to technical table.
 """
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -202,6 +203,7 @@ def run_stage(start_date: str, end_date: str):
     Reads daily data, computes all technical indicators per symbol,
     batch upserts into the technical table.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting technical stage: %s to %s", start_date, end_date)
 
     conn = get_connection()
@@ -260,7 +262,8 @@ def run_stage(start_date: str, end_date: str):
     conn.commit()
     conn.close()
 
-    logger.info("Completed technical stage: %d rows upserted", len(result_df))
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Completed technical stage: %d rows upserted (%.2fs)", len(result_df), _elapsed)
 
 
 def _get(row, col, default=None):

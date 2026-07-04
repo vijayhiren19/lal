@@ -11,6 +11,7 @@ Three exports:
 """
 
 import logging
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta
@@ -304,6 +305,7 @@ def download_nse_data(start_date, end_date, from_disk_only=False):
 
     When *from_disk_only* is True, this function does nothing.
     """
+    _t0 = time.perf_counter()
     if from_disk_only:
         logger.info("from_disk_only=True — download phase skipped")
         return
@@ -351,6 +353,9 @@ def download_nse_data(start_date, end_date, from_disk_only=False):
                 logger.error("Thread error — %s %s: %s", ft, ds, e)
                 _log_error(ds, ft, f"Thread exception: {e}")
 
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Download phase complete: %.2fs", _elapsed)
+
 
 # ── Processing ─────────────────────────────────────────────────────────────
 
@@ -361,6 +366,7 @@ def process_nse_data(start_date, end_date):
 
     Returns (stage_rows_inserted, delivery_rows_inserted).
     """
+    _t0 = time.perf_counter()
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -448,8 +454,9 @@ def process_nse_data(start_date, end_date):
                      date_iso, len(stage_batch), len(delivery_batch))
 
     conn.close()
-    logger.info("Processing complete — %d stage rows, %d stage_delivery rows",
-                stage_count, delivery_count)
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Processing complete — %d stage rows, %d stage_delivery rows (%.2fs)",
+                stage_count, delivery_count, _elapsed)
     return stage_count, delivery_count
 
 
@@ -483,6 +490,7 @@ def load_historical_data(start_date=None, end_date=None, from_disk_only=False):
 
     logger.info("load_historical_data — %s to %s (from_disk_only=%s)",
                 start_date, end_date, from_disk_only)
+    _t0 = time.perf_counter()
 
     # 1. Download missing files
     download_nse_data(start_date, end_date, from_disk_only=from_disk_only)
@@ -492,7 +500,10 @@ def load_historical_data(start_date=None, end_date=None, from_disk_only=False):
     init_schema()
 
     # 3. Parse → DB
-    return process_nse_data(start_date, end_date)
+    result = process_nse_data(start_date, end_date)
+    _elapsed = time.perf_counter() - _t0
+    logger.info("load_historical_data complete: %.2fs", _elapsed)
+    return result
 
 
 # ── Conditional CLI entry point ────────────────────────────────────────────

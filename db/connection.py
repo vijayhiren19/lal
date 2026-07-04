@@ -376,6 +376,19 @@ def init_schema():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pipeline_jobs (
+            job_id      TEXT PRIMARY KEY,
+            stages      TEXT NOT NULL,
+            start_date  TEXT,
+            end_date    TEXT,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            started_at  TEXT,
+            completed_at TEXT,
+            error_log   TEXT
+        )
+    """)
+
     # ── Schema migrations (existing DB upgrade path) ──────────────────
     # All ALTER TABLE ADD COLUMN are idempotent via try/except.
 
@@ -518,9 +531,16 @@ def init_schema():
     for idx in indexes:
         cursor.execute(idx)
 
+    # Create the stock_universe view
+    try:
+        from src.api.views import create_stock_universe_view
+        create_stock_universe_view(conn)
+    except Exception:
+        logger.exception("Failed to create stock_universe view")
+
     conn.commit()
     conn.close()
-    logger.info("Database schema initialized: %d tables", len(indexes) + 13)
+    logger.info("Database schema initialized: %d tables", len(indexes) + 14)
 
 
 def get_schema_version():

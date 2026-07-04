@@ -11,6 +11,7 @@ batch-inserts via executemany, and verifies past picks.
 
 import json
 import logging
+import time
 from functools import lru_cache
 
 import numpy as np
@@ -688,13 +689,15 @@ def run_scoring(trade_date):
     Args:
         trade_date: ISO date string (YYYY-MM-DD).
     """
+    _t0 = time.perf_counter()
     cfg = _load_config()
     conn = get_connection()
 
     try:
         df = _load_data(conn, trade_date)
         if df.empty:
-            logger.warning("No data to score for %s", trade_date)
+            _elapsed = time.perf_counter() - _t0
+            logger.warning("No data to score for %s (%.2fs)", trade_date, _elapsed)
             return
 
         scored = _compute_v2a_score(df, cfg)
@@ -704,6 +707,12 @@ def run_scoring(trade_date):
         _save_picks(conn, scored, trade_date, cfg)
 
         _verify_past_picks(conn, trade_date, cfg)
+
+        _elapsed = time.perf_counter() - _t0
+        logger.info(
+            "Completed scoring for %s: %d results, %d picks (%.2fs)",
+            trade_date, len(scored), min(len(scored), cfg["top_n"]), _elapsed,
+        )
 
     except Exception:
         logger.exception("Scoring failed for %s", trade_date)

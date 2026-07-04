@@ -404,8 +404,8 @@ The scorer implements the 13-component V2a formula:
 ### F&O & Index Membership Integration
 
 F&O membership (`build_fno_membership.py`) and index membership (`build_index_history.py`) are standalone build scripts (not pipeline stages). Run them once (or periodically):
-- `fno_membership` table: 311 rows, 270 symbols, PIT intervals with `valid_from`/`valid_to`. Rebuild: `.venv\Scripts\python build_fno_membership.py`
-- `index_membership` table: 6,525 rows, 1,313 symbols, 42 indices (20 sector indices mapped to normalized sector names). Rebuild: `.venv\Scripts\python build_index_history.py`
+- `fno_membership` table: 311 rows, 270 symbols, PIT intervals with `valid_from`/`valid_to`. Rebuild: `python build_fno_membership.py`
+- `index_membership` table: 6,525 rows, 1,313 symbols, 42 indices (20 sector indices mapped to normalized sector names). Rebuild: `python build_index_history.py`
 
 The scorer loads these tables on each call (`_load_fno_membership()`, `_load_nifty500_members()`) to get PIT-accurate membership flags.
 
@@ -518,7 +518,7 @@ scoring:
 | `build_shareholding.py` | Downloads shareholding flat CSV, populates `shareholding` table (59,769 rows, 2,261 symbols, quarterly FII/DII 2001→2026) | `github.com/aditya-jha/nse-historical-membership` |
 | `build_equity_master.py` | Downloads Nifty 500 constituent list, builds `data/eq_mast.csv` (2,401 rows, 515 named sectors) | `archives.nseindia.com` |
 
-Rebuild any data source by running the corresponding script: `.venv\Scripts\python build_*.py`
+Rebuild any data source by running the corresponding script: `python build_*.py`
 
 ## Tuning & Backtesting
 - `config/scoring.yaml` — weights, thresholds, and boost parameters

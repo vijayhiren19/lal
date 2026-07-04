@@ -9,6 +9,7 @@ ISIN column detection uses substring match ("ISIN" in col_name) to handle both
 """
 
 import logging
+import time
 import csv
 from pathlib import Path
 
@@ -151,6 +152,7 @@ def run_stage(start_date=None, end_date=None):
         start_date: Ignored for this stage (always fetches full master).
         end_date: Ignored for this stage.
     """
+    _t0 = time.perf_counter()
     logger.info("Starting equity_master stage")
 
     # Use cached file if available
@@ -163,7 +165,8 @@ def run_stage(start_date=None, end_date=None):
     df = _load_equity_master_csv(path)
     count = _upsert_equity_master(df)
 
-    logger.info("Completed equity_master stage: %d symbols", count)
+    _elapsed = time.perf_counter() - _t0
+    logger.info("Completed equity_master stage: %d symbols (%.2fs)", count, _elapsed)
     return count
 
 
