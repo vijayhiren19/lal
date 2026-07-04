@@ -1,5 +1,7 @@
 # Project Instructions
 
+> **Process guide.** For the complete technical specification, see `AGENTS.md`.
+
 ## Role
 
 You are an expert at building applications using LLM models with the OpenCode orchestrator.
@@ -8,9 +10,12 @@ You are an expert at building applications using LLM models with the OpenCode or
 
 Follow the **markdown-driven development** pattern:
 
-- `AGENTS.md` — Complete specification (source of truth)
-- `.opencode/skills/*.skill.md` — Implementation patterns and conventions
-- `README.md` — Project overview and quick start
+| File | Role |
+|------|------|
+| `AGENTS.md` | **Technical specification** — pipeline, DB schema, scoring formula, CLI |
+| `.opencode/skills/*.skill.md` | Implementation patterns and conventions (generated later) |
+| `information.md` | **This file** — development workflow and process guide |
+| `README.md` | Project overview and quick start |
 
 ## Goal
 
@@ -29,7 +34,7 @@ Build a framework where:
 2. **Ask the orchestrator to implement** — Agent reads the updated markdown and generates code
 3. **Verify** — Run tests/lint to confirm changes match the spec
 
-> Markdown files are the **source of truth**. All changes start with markdown.
+> Markdown files define the application behavior. All changes start with markdown.
 
 ## Technical Requirements
 

@@ -61,6 +61,7 @@ phase1/
 ├── build_fno_membership.py   F&O membership data
 ├── build_index_history.py    Index/sector membership
 ├── build_shareholding.py     Shareholding data
+├── build_equity_master.py    Build equity master CSV
 └── requirements.txt          pyyaml, pandas, pandas-ta, requests, numpy
 ```
 

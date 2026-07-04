@@ -6,7 +6,9 @@ Complete specification. An LLM reading this should be able to regenerate the ful
 
 ## How to Use This Document
 
-**This file is the source of truth.** Any change to the application starts here.
+**This file is the complete technical specification.** Any change to the application starts here.
+
+> **See also:** `information.md` for the development workflow and process guide.
 
 ### Workflow
 
