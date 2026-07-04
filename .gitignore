@@ -7,10 +7,13 @@ node_modules/
 temp/
 data/**/*.zip
 data/**/*.DAT
+data/**/*.txt
+data/**/*.log
+
 *.db
 .opencode/package.json
 .opencode/package-lock.json
-
+temp_*.py
 # C extensions
 *.so
 

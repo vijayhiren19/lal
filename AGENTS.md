@@ -4,10 +4,33 @@ Complete specification. An LLM reading this should be able to regenerate the ful
 
 ---
 
+## How to Use This Document
+
+**This file is the complete technical specification.** Any change to the application starts here.
+
+> **See also:** `information.md` for the development workflow and process guide.
+
+### Workflow
+
+1. **Edit this file** — Add/modify specification for new features
+2. **Ask agent to implement** — Agent reads this file and generates code
+3. **Verify** — Run tests/lint to confirm changes match spec
+
+### Quick Reference
+
+| Section | Purpose |
+|---------|---------|
+| Pipeline Architecture | Stage order and what each stage does |
+| Database Tables | All table schemas |
+| V2a Scoring Formula | How stocks are scored |
+| CLI | Command-line interface usage |
+| Implementation Conventions | Coding patterns to follow |
+
+---
+
 ## Project Structure
 
 ```
-phase1/
 ├── AGENTS.md                 ← this file (complete spec)
 ├── config/
 │   ├── __init__.py           ROOT_DIR, DATA_DIR, DB_PATH constants
@@ -18,9 +41,9 @@ phase1/
 ├── src/
 │   ├── runner.py             CLI orchestrator, stage dispatch
 │   ├── data_pipeline/
-│   │   ├── fetcher.py        Download + parse NSE bhavcopy + delivery MTO
+│   │   ├── fetcher.py        Download + parse NSE bhavcopy → stage table, MTO → stage_delivery
 │   │   ├── equity_master.py  Sector/industry from NSE equity master CSV
-│   │   ├── enricher.py       Merge stage + delivery → daily table
+│   │   ├── enricher.py       Merge stage + stage_delivery → daily table (wvap, delivery, 5d flags)
 │   │   ├── technical.py      SMA, EMA, golden cross, trend stage
 │   │   ├── price_level.py    52wk/26wk/4wk highs/lows, pivots
 │   │   ├── momentum.py       RSI, MACD, Stoch, MFI, ADX, CCI, Williams %R
@@ -36,7 +59,7 @@ phase1/
 ├── build_index_history.py    Populate index_membership table
 ├── build_shareholding.py     Populate shareholding table
 ├── build_equity_master.py    Build data/eq_mast.csv
-└── requirements.txt          pyyaml>=6.0, pandas>=2.0, pandas-ta>=0.3, requests>=2.31, numpy>=1.24
+└── requirements.txt          pyyaml>=6.0, pandas>=2.0, pandas-ta>=0.3, requests>=2.31, numpy>=1.24, brotli>=1.2
 ```
 
 ---
@@ -49,20 +72,33 @@ STAGE ORDER (src/runner.py):
     → volatility → averages → derivatives → score → hits
 
   fetch:         Download BhavCopy CSVs + MTO.DAT files from NSE, parse →
-                 stage table (raw price) + delivery table (qty, pct)
-  equity_master: Download EQ_MAST.csv → equity_master table (sector, industry)
-  enrich:        Join stage + delivery, compute rolling volume/delivery avgs →
-                 daily table + enriched delivery table
+                 stage table (raw price) + stage_delivery table (qty, pct)
+  equity_master: Download NSE EQUITY_L.csv (or EQ_MAST.csv) → equity_master table (symbol, isin, sector, industry)
+  enrich:        Join stage + stage_delivery, compute wvap, delivery metrics,
+                 lowest_closing_5days, highest_closing_5days → daily table
   technical:     SMA(20/50/100/200), EMA(9/20/50/200), crossovers →
                  technical table
+                 ⚠ SMA/EMA from pandas_ta may contain Python `None` (not NaN).
+                   Always coerce via `pd.to_numeric(col, errors="coerce")` before
+                   comparison ops like `>`, `<`, `==` to avoid `TypeError`.  See
+                   conventions below.
   price_level:   252/126/20-day rolling highs/lows, pivot points →
                  price_level table
   momentum:      RSI(14/9), MACD(12/26/9), Stoch(14/3/3), MFI(14), ADX(14),
                  CCI(20), Williams %R(14) → momentum table
+                 ⚠ Window functions (rsi, stoch_k, macd component scoring) must
+                   use `np.asarray(pd.to_numeric(col, errors="coerce").fillna(v), dtype=float)`
+                   to convert columns before numpy ops.  pandas-ta can produce
+                   Python `None` → object dtype → `UFuncOutputCastingError`.
   volatility:    ATR(14), Bollinger Bands(20,2σ), Keltner Channels,
                  historical vol(20d) → volatility table
   averages:      Rolling means of close, volume, RSI, delivery%, volatility
-                 at 21/63/126/252/756 windows → averages table
+                  at 21/63/126/252/756 windows + volume technical metrics
+                  (vol_5d_avg, vol_10d_avg, vol_20d_avg, vol_ratio,
+                   vol_breakout_up, vol_trend_5d, volume_score) → averages table
+                 ⚠ The merged DataFrame column names must match metric names:
+                   rename `close_price→close`, `traded_volume→volume` before
+                   the per-metric loop, or `KeyError` on column lookup.
   derivatives:   NSE FO UDiFF bhavcopy via daily-reports API →
                  futures_data table (basis, OI change)
   score:         V2a formula (13 components), delivery value filter,
@@ -96,22 +132,16 @@ Execution: stages run sequentially. Each stage reads from SQLite (WAL mode), com
 
 Source: BhavCopy_JSon files, 3-column-name formats, filtered to SERIES='EQ'.
 
-### delivery
+### stage_delivery
 | Column | Type | Notes |
 |--------|------|-------|
-| exchange | TEXT PK | |
-| trade_date | TEXT PK | |
+| exchange | TEXT PK | 'NSE' |
+| trade_date | TEXT PK | ISO date |
 | symbol | TEXT PK | |
-| qty | INTEGER | |
+| qty | INTEGER | delivery quantity |
 | pct | REAL | delivery % |
-| qty_5d_avg | REAL | rolling mean (enricher) |
-| qty_20d_avg | REAL | |
-| pct_5d_avg | REAL | |
-| pct_20d_avg | REAL | |
-| pct_trend | REAL | linear slope over 5 days |
-| vol_spike | INTEGER | qty > 2× qty_20d_avg |
 
-Source: NSE MTO_{DDMMYYYY}.DAT files (pipe-delimited with comma-separated fields starting with '20'). Columns (positional): date, ref, symbol, series, isin, qty, pct.
+Source: NSE MTO_{DDMMYYYY}.DAT files (pipe-delimited with comma-separated fields starting with '20'). Columns (positional): date, ref, symbol, series, isin, qty, pct. Filtered to SERIES='EQ'. Raw delivery data stored here, then merged into daily by enricher.
 
 ### daily
 | Column | Type | Notes |
@@ -122,11 +152,21 @@ Source: NSE MTO_{DDMMYYYY}.DAT files (pipe-delimited with comma-separated fields
 | open_price, high_price, low_price, close_price, previous_close | REAL | |
 | traded_volume | INTEGER | |
 | traded_value | REAL | |
-| vol_5d_avg, vol_10d_avg, vol_20d_avg | REAL | Rolling volume means |
-| vol_ratio | REAL | vol / vol_20d_avg |
-| vol_breakout_up | INTEGER | vol_ratio >= 1.5 AND close > open |
-| vol_trend_5d | REAL | Linear slope of volume over 5d |
-| volume_score | REAL | 0-100 composite = vol_ratio_score + trend_score + vs_avg_score + breakout_score |
+| day_return_pct | REAL | (close - prev_close) / prev_close × 100 |
+| upper_circuit_hit | INTEGER | day_return_pct >= 19.5 |
+| lower_circuit_hit | INTEGER | day_return_pct <= -19.5 |
+| delivery_volume | INTEGER | delivery quantity |
+| delivery_value | REAL | delivery_volume × wvap_price |
+| delivery_pct | REAL | delivery % (from MTO) |
+| wvap_price | REAL | (high_price + low_price + close_price) / 3 |
+| lowest_closing_5days | INTEGER | 1 if today's close is lowest in last 5 trading days (min_periods=5) |
+| highest_closing_5days | INTEGER | 1 if today's close is highest in last 5 trading days (min_periods=5) |
+| delivery_qty_5d_avg | REAL | Rolling 5-day mean of delivery_volume |
+| delivery_qty_20d_avg | REAL | Rolling 20-day mean of delivery_volume |
+| delivery_pct_5d_avg | REAL | Rolling 5-day mean of delivery_pct |
+| delivery_pct_20d_avg | REAL | Rolling 20-day mean of delivery_pct |
+| delivery_pct_trend | REAL | Linear slope of delivery_pct over 5d |
+| vol_spike | INTEGER | delivery_volume > 2× delivery_qty_20d_avg |
 
 ### technical
 | Column | Type | Notes |
@@ -182,6 +222,7 @@ Source: NSE MTO_{DDMMYYYY}.DAT files (pipe-delimited with comma-separated fields
 ### averages
 5 windows: [21, 63, 126, 252, 756]. Columns follow pattern `{metric}_avg_{window}d`:
 - close_avg_{w}d, volume_avg_{w}d, rsi_avg_{w}d, delivery_pct_avg_{w}d, volatility_avg_{w}d
+- Volume technical metrics appended: vol_5d_avg, vol_10d_avg, vol_20d_avg, vol_ratio, vol_breakout_up, vol_trend_5d, volume_score
 
 ### futures_data
 | Column | Type | Notes |
@@ -230,12 +271,15 @@ Source: NSE daily-reports API → FO-UDIFF-BHAVCOPY-CSV → STF (stock futures) 
 | quarter_end_int | INTEGER |
 | promoter_pct, fii_pct, dii_pct, public_pct | REAL |
 
-Source: `github.com/aditya-jha/nse-historical-membership` → `shareholding_history/data/parsed/_flat.csv` (CC BY 4.0)
+Source: `github.com/aditya-jha/nse-historical-membership` → `shareholding_history/data/parsed/_flat.csv` (CC BY 4.0).
+Column `period` detected by exact match `fn_lower == "period"` (in addition to substring match), since the flat CSV uses a bare `period` column name.
 
 ### fno_membership
 | symbol | TEXT PK |
 | valid_from | TEXT PK |
 | valid_to | TEXT (nullable = still active) |
+
+Source: `github.com/aditya-jha/nse-historical-membership` → `fno_history/data/fno_membership_history.csv` (CC BY 4.0).
 
 ### index_membership
 | symbol | TEXT PK |
@@ -245,6 +289,7 @@ Source: `github.com/aditya-jha/nse-historical-membership` → `shareholding_hist
 | valid_to | TEXT |
 | weightage | REAL |
 
+Source: `github.com/aditya-jha/nse-historical-membership` → `index_history/data/index_membership_history.csv` (CC BY 4.0).
 20 sector indices mapped to normalized sector names. Nifty 500 = quality gate.
 
 ### predicted_stock
@@ -284,11 +329,28 @@ https://archives.nseindia.com/archives/equities/mto/MTO_{DDMMYYYY}.DAT
 ```
 Fixed-width-ish format: lines starting with '20' = data rows. Fields comma-separated after first 2 chars of date. Positions: [0]=date, [2]=symbol, [3]=series, [4]=ISIN, [5]=delivery_qty, [6]=delivery_pct. Filtered to SERIES='EQ'.
 
+### Equity Master URL (fallback chain)
+
+The primary NSE equity master CSV (`EQ_MAST.csv`) at `https://nsearchives.nseindia.com/content/equities/EQ_MAST.csv` **returns 404** as of July 2026. The working fallback is the listed-equities CSV:
+
+```
+https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
+```
+
+Columns: `SYMBOL, NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE`
+(No INDUSTRY column — all symbols get sector=`UNKNOWN`, industry=`UNKNOWN` via the module's fallback.)
+
+The `equity_master.py` module tries `EQ_MAST.csv` first, then falls back to `EQUITY_L.csv` if the primary file doesn't exist on disk. ISIN column detection uses substring `"ISIN" in col_name` (not exact match) to handle the `ISIN NUMBER` variant.
+
 ### FO UDiFF (derivatives) via NSE API
 ```
 GET https://www.nseindia.com/api/daily-reports?key=FO
 ```
 Returns JSON with CurrentDay/PreviousDay arrays. Each item has: fileKey='FO-UDIFF-BHAVCOPY-CSV', tradingDate (DD-Mon-YYYY), filePath, fileActlName. Full URL = filePath + fileActlName. Response is a ZIP containing one CSV. Columns: FinInstrmTp='STF' = stock futures, TckrSymb, XpryDt, OpnPric, HghPric, LwPric, ClsPric, OpnIntrst, ChngInOpnIntrst, TtlTradgVol, UndrlygPric.
+
+> **Brotli compression:** The NSE API now returns responses with `Content-Encoding: br` (Brotli compression). The `brotli` Python package is required for requests to auto-decompress. Install via `pip install brotli` — listed in `requirements.txt`.
+
+> **Expiry date format:** The `XpryDt` column in the CSV may be in either `DD-Mon-YYYY` (legacy) or `YYYY-MM-DD` (current) format. The parser's `_parse_nse_date()` function detects both formats automatically.
 
 ### HTTP Headers (all NSE requests)
 ```python
@@ -335,7 +397,7 @@ NSE_HOLIDAYS_2025_2026 = {
 2. Download using `ThreadPoolExecutor(max_workers=10)` — each file independently.
 3. Log failures to `data/download_errors.log`.
 4. Parse ZIP contents (bhavcopy) or line-by-line (MTO) in `process_nse_data()`.
-5. Batch insert into stage and delivery tables: `executemany(sql, batch[i:i+500])` per date, per table, then commit.
+5. Batch insert into stage and stage_delivery tables: `executemany(sql, batch[i:i+500])` per date, per table, then commit.
 
 ---
 
@@ -346,9 +408,8 @@ NSE_HOLIDAYS_2025_2026 = {
 One SQLite query per data source at the given trade_date, merged on symbol:
 
 ```python
-daily         [exchange, trade_date, symbol, close_price, previous_close, traded_value]
-delivery      [qty, pct, qty_20d_avg, pct_trend]
-stage         [day_return_pct, isin]
+daily         [exchange, trade_date, symbol, close_price, previous_close, traded_value,
+               day_return_pct, delivery_volume, delivery_pct, delivery_qty_20d_avg, delivery_pct_trend, isin]
 shareholding  [fii_pct, dii_pct, promoter_pct, ...]  — latest 2 quarters, diff computed
 futures_data  [basis_pct, oi_change_pct]
 momentum      [rsi_14, adx_14, macd, ...]
@@ -357,7 +418,11 @@ sector        [sector]  — from index_membership, fallback to equity_master
 ```
 
 ISIN filter: `isin.str.startswith('INE', na=False)`.  
-Delivery value filter: `qty × close_price >= min_dev_trade_value_cr × 1e7` (default 0.5 Cr).
+Delivery value filter: `delivery_volume × wvap_price >= min_dev_trade_value_cr × 1e7` (default 0.5 Cr).
+
+> **Defensive merge pattern:** `futures_data` and `shareholding` are optional data sources. When empty (no rows for the trade_date), the merge is skipped, and the expected columns (`basis_pct`, `oi_change_pct`, `curr_fii`, `prev_fii`, `curr_dii`, `prev_dii`) would be missing — causing `KeyError` in score computation. **Always add an `else` branch** after `if not df.empty:` that zero-fills the expected columns so downstream code never fails on missing columns.
+>
+> **Shareholding `quarter_end_int`:** The `_load_shareholding()` query filters on `WHERE quarter_end_int <= ?`. If this column is NULL (as it was after initial `build_shareholding.py` runs), the query returns 0 rows and shareholding data is silently skipped. The build script must populate `quarter_end_int` via `CAST(REPLACE(quarter_end, '-', '') AS INTEGER)`, or scoring will have no institutional data for any date.
 
 ### Component Score Computation
 
@@ -374,11 +439,11 @@ value_score = delivery_pct_boost (15)  IF pct >= delivery_pct_threshold (60)
               ELSE 0
 
 # 3. Rising delivery trend (↗ quality_score, weight ~10-15%)
-quality_score = pct_trend_boost (10)  IF pct_trend >= pct_trend_threshold (0.5)
+quality_score = pct_trend_boost (10)  IF delivery_pct_trend >= pct_trend_threshold (0.5)
                ELSE 0
 
 # 4. Delivery qty surge (↗ technical_strength, weight ~10-15%)
-ratio = qty / qty_20d_avg  (only where avg > 0)
+ratio = delivery_volume / delivery_qty_20d_avg  (only where avg > 0)
 technical_strength = delivery_qty_boost (10)  IF ratio >= delivery_qty_ratio_threshold (1.5)
                     ELSE 0
 
@@ -453,6 +518,8 @@ All past picks where `pick_date + lookahead_days (10) <= trade_date` and not yet
 
 Equity master rebuilt by `build_equity_master.py`: downloads Nifty 500 constituent list, maps Industry to sector column. 2401 rows (515 named sectors, 20 unique sector names).
 
+> **Note:** As of July 2026, the NSE `EQ_MAST.csv` URL is dead. The pipeline stage falls back to `EQUITY_L.csv` (no INDUSTRY column), resulting in all symbols having sector=UNKNOWN / industry=UNKNOWN. The primary sector source is always `index_membership`.
+
 ---
 
 ## Hit Analysis (hits_analyzer.py)
@@ -472,14 +539,14 @@ For each target (pct from config) and window (days from config):
 ### Analyze
 Pivot on entry_mode × target × window: count picks, count hits, compute hit %. Print grouped by entry_mode.
 
-### Output (7,320 picks, Jan 2025–Jun 2026, open+3%)
+### Output (7,359 picks, Jan 2025–Jun 2026, open+3%)
 | Target Hit | Count | % |
 |------------|-------|---|
-| None | 4,984 | 68.4% |
-| Tg1 (4% in 5d) | 142 | 1.9% |
-| Tg2 (5% in 10d) | 909 | 12.5% |
-| Tg3 (10% in 15d) | 1,255 | 17.2% |
-| **Any** | **2,306** | **31.6%** |
+| None | 5,692 | 77.3% |
+| Tg1 (4% in 5d) | 95 | 1.3% |
+| Tg2 (5% in 10d) | 690 | 9.4% |
+| Tg3 (10% in 15d) | 882 | 12.0% |
+| **Any** | **1,667** | **22.7%** |
 
 ---
 
@@ -547,10 +614,21 @@ hit_analysis:
 
 ## Implementation Conventions
 
+- ISIN column detection in equity master CSV uses `"ISIN" in col_name` (substring match), not exact match — handles both `ISIN` and `ISIN NUMBER` column headers
+- Period column detection in shareholding CSV uses `fn_lower == "period"` (exact match) in addition to substring matching — the `_flat.csv` file uses a bare `period` column name
 - All numeric values rounded to 2 decimal places at creation
 - `_safe_rnd(result)` wraps `pandas_ta` calls: `result.round(2) if result is not None else None`
 - `np.where` with Series: convert `.to_numpy()` first to avoid pandas-index alignment issues
 - `.astype(float)` after `np.where` to ensure float64 dtype
+- **SMA/EMA coercion:** pandas-ta may return Python `None` (not NaN) in SMA/EMA columns. Always use `pd.to_numeric(col, errors="coerce")` before comparison ops (`>`, `<`, `==`) to avoid `TypeError`. This applies to `golden_cross`, `ema20_gt_ema50`, `price_gt_sma200` and any flag using SMA/EMA values. See also: `pandas_ta` issue with return types.
+- **Window function conversion:** RSI, Stoch, MACD histogram columns from pandas-ta can be object dtype when Python `None` values appear. Before using in `np.where` or `np.minimum`, convert with `np.asarray(pd.to_numeric(col, errors="coerce").fillna(v), dtype=float)` to avoid `UFuncOutputCastingError`.
+- **Averages column rename:** The `averages.py` merge loop iterates with metric names (`"close"`, `"volume"`, etc.) as column keys. The merged DataFrame must have columns named exactly `close`, `volume`, `rsi`, `delivery_pct`, `volatility` — not `close_price`, `traded_volume`. Always add these renames to the `merged.rename(columns={...})` dict.
+- **Derivatives date format:** The FO UDiFF CSV `XpryDt` column switched from `DD-Mon-YYYY` to `YYYY-MM-DD`. The parser's `_parse_nse_date()` function checks for ISO format first (via length/position heuristics), then falls back to `%d-%b-%Y` parsing.
+- **Brotli compression:** NSE API responses now use `Content-Encoding: br`. The `brotli` package is required in `requirements.txt` for `requests` to auto-decompress. Without it, `resp.json()` fails with `JSONDecodeError: Expecting value`.
+- **Scorer defensive merge:** Any optional data source (`futures_data`, `shareholding`) merged via `if not df.empty:` must have an `else` branch that zero-fills all expected columns. Without this, dates lacking that data raise `KeyError` in score computation because the merge never creates the columns.
+- **Shareholding `quarter_end_int` must be populated:** `_load_shareholding()` filters on `WHERE quarter_end_int <= ?`. The build script (`build_shareholding.py`) must populate `quarter_end_int` via `CAST(REPLACE(quarter_end, '-', '') AS INTEGER)`. If NULL, the query returns 0 rows, the DataFame is empty, the merge is skipped, and `curr_fii`/`prev_fii`/`curr_dii`/`prev_dii` columns are missing — causing `KeyError: 'curr_fii'` for all dates.
+- **Hit analyzer `_get_next_trading_day` must filter by symbol:** The function queries `FROM daily WHERE trade_date > ? ORDER BY trade_date ASC LIMIT 1`. Without `symbol = ?` in the WHERE clause, it returns the first row from ANY stock on the next trading day, making ALL picks share the same entry_price. **Always add `symbol = ?`** to the query parameters.
+- **`lowest_closing_5days` / `highest_closing_5days` compute pattern:** Both use `groupby(symbol).transform(lambda x: x.rolling(5, min_periods=5).min()/.max())` on `close_price` then compare against the current value with `==`. The `min_periods=5` ensures the first 4 rows per symbol always produce `False` (NaN comparison). The comparison result is cast to `int`.
 - All pipeline modules share a logger via `get_logger('runner')`
 - `INSERT OR REPLACE` everywhere — idempotent
 - Only `requests`, `pandas`, `pandas-ta`, `numpy`, `pyyaml` in requirements — no `yfinance`, `jugaad_data`, `vectorbt`
@@ -573,22 +651,6 @@ python -m src.runner \
 Stage names: `fetch`, `equity_master`, `enrich`, `technical`, `price_level`, `momentum`, `volatility`, `averages`, `derivatives`, `score`, `hits`. Pass `all` or comma-separated subset.
 
 ---
-
-## Flask UI Server
-
-```bash
-# Start Flask UI in background (non-blocking for main agent)
-# Use Start-Process (not Start-Job) to keep it running
-Start-Process -NoNewWindow -FilePath ".venv\Scripts\python.exe" -ArgumentList "run_flask.py"
-
-# Verify server is running
-(Invoke-WebRequest -Uri "http://127.0.0.1:5000/" -UseBasicParsing).StatusCode
-
-# Stop the server
-Get-Process python | Where-Object { $_.CommandLine -match "run_flask" } | Stop-Process -Force
-```
-
-**Agent instruction**: When starting the Flask server, use `Start-Process` (background, non-blocking) or delegate to a sub-agent via `task` tool so the main agent stays responsive. Do NOT use `Start-Job` — it terminates when the shell exits. To verify the UI, launch a sub-agent (`general` type) with Playwright browser tools to navigate pages and check for console errors.
 
 ## Daily Workflow
 

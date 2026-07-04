@@ -1,6 +1,6 @@
 ---
 description: Validate pipeline outputs, run hit analysis, execute tests, and report data quality issues.
-mode: subagent
+mode: all
 temperature: 0.2
 steps: 50
 permission:

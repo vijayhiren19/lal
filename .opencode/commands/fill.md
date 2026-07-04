@@ -13,13 +13,7 @@ Supported formats:
 - "last trading day", "today", "yesterday"
 - Empty (defaults to last trading day)
 
-First, run the helper to resolve the date range:
-
-```
-python scripts/fill.py $ARGUMENTS
-```
-
-This outputs START=YYYY-MM-DD and END=YYYY-MM-DD.
+The helper script will be created at `scripts/fill.py` to resolve the date range. It outputs START=YYYY-MM-DD and END=YYYY-MM-DD.
 
 Then run the pipeline with those dates. Use the FULL pipeline for a single date or last trading day:
 
