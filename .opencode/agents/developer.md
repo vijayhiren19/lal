@@ -35,7 +35,7 @@ Load the relevant skill(s) for your task. Each skill contains patterns, conventi
 
 | Skill File | When to Load | What It Covers |
 |---|---|---|
-| `skills/data-pipeline.skill.md` | Building/modifying any pipeline stage | pandas-ta usage, batch processing, all 8 pipeline stages (fetch → enrich → technical → price_level → momentum → volatility → averages), indicator formulas, target table INSERT SQL |
+| `skills/data-pipeline.skill.md` | Building/modifying any pipeline stage | pandas-ta usage, batch processing, all 9 pipeline stages (fetch → equity_master → enrich → technical → price_level → momentum → volatility → averages → derivatives), indicator formulas, target table INSERT SQL |
 | `skills/scoring.skill.md` | Building/modifying the V2a formula | 13-component scoring, sector-diversified top-20 picks, performance verification, shareholding/F&O/index membership integration, backtest results |
 | `skills/stage-loading.skill.md` | Working with NSE data sources | Bhavcopy 3-format parsing, MTO DAT parsing, ISIN filtering, NSE session/headers, local disk cache strategy, error handling |
 | `skills/validation.skill.md` | Building/modifying validation/hit analysis | Validation gates, quality checks, hit rate computation, predicted_stock table, orchestration pattern |
