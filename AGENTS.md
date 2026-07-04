@@ -4,6 +4,28 @@ Complete specification. An LLM reading this should be able to regenerate the ful
 
 ---
 
+## How to Use This Document
+
+**This file is the source of truth.** Any change to the application starts here.
+
+### Workflow
+
+1. **Edit this file** — Add/modify specification for new features
+2. **Ask agent to implement** — Agent reads this file and generates code
+3. **Verify** — Run tests/lint to confirm changes match spec
+
+### Quick Reference
+
+| Section | Purpose |
+|---------|---------|
+| Pipeline Architecture | Stage order and what each stage does |
+| Database Tables | All table schemas |
+| V2a Scoring Formula | How stocks are scored |
+| CLI | Command-line interface usage |
+| Implementation Conventions | Coding patterns to follow |
+
+---
+
 ## Project Structure
 
 ```

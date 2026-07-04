@@ -56,32 +56,6 @@
           ".opencode/**/*.md": "allow"
         }
       }
-    },
-    "developer": {
-      "permission": {
-        "edit": {
-          "*": "deny",
-          "*.py": "allow",
-          "**/*.py": "allow",
-          "*.md": "allow",
-          "**/*.md": "allow",
-          "*.yml": "allow",
-          "**/*.yml": "allow",
-          ".opencode/**": "allow"
-        }
-      }
-    },
-    "tester": {
-      "permission": {
-        "edit": {
-          "*": "deny",
-          "*.py": "allow",
-          "**/*.py": "allow",
-          "*.md": "allow",
-          "**/*.md": "allow",
-          ".opencode/**": "allow"
-        }
-      }
     }
   }
 }

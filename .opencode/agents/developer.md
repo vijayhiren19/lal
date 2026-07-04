@@ -1,6 +1,6 @@
 ---
 description: Generate, modify, and maintain all pipeline and scoring code from the AGENTS.md specification. Loads domain skills for implementation patterns.
-mode: subagent
+mode: all
 temperature: 0.2
 steps: 50
 permission:
