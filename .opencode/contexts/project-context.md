@@ -1,7 +1,7 @@
 # Indian Stock Scrip Scoring — Project Context
 
 ## Architecture Overview
-A modular, configurable data pipeline that processes Indian stock market data through 11 stages (9 data pipeline + 2 scoring). Each stage is independently developed, tested, and validated. The pipeline is orchestrated by a central runner that enforces stage ordering.
+A modular, configurable data pipeline that processes Indian stock market data through 11 stages. Each stage is independently developed, tested, and validated. The pipeline is orchestrated by a central runner that enforces stage ordering.
 
 ## Team
 | Agent | Focus | Key Files |
@@ -29,41 +29,44 @@ Changes to `AGENTS.md` or a skill → Developer re-generates the affected code. 
 | 2 | RSI + SMA for 1 symbol | TradingView |
 | 3 | Full pipeline, all symbols, 3 months | No errors, reasonable values |
 | 4 | Scale to full history | Performance OK |
-| 5 | Scoring heuristic #1 (Delivery) | CSV output, intuition check |
-| 6 | Remaining heuristics | Each one improves vs previous |
+| 5 | Scoring component #1 (Delivery) | CSV output, intuition check |
+| 6 | Remaining components | Each one improves vs previous |
 | 7 | Backtesting | Score deciles → forward returns |
 
 ## Pipeline Stages
 
 | Stage | Description |
-|---|---|
-| Fetch | Raw data from NSE/BSE (daily OHLCV, corporate actions, indices) |
-| Enrich | Add sector, market cap, F&O availability, delivery %, etc. |
-| Volume Metrics | Volume rolling averages, ratios, breakouts, volume score |
-| Technical | Moving averages, crossovers, RSI, MACD, ATR, Bollinger Bands, trend assessment |
-| Price Level | 52-week / 26-week / 4-week price levels, pivot points, breakout flags |
-| Momentum | Oscillators, momentum score, decay factor |
-| Volatility | ATR, Bollinger Bands, Keltner Channels, historical volatility |
-| Averages | Rolling averages over 21d / 63d / 126d / 252d / 756d for key metrics |
-| Score | Weighted composite scoring (0-100) with configurable heuristics |
-| Validate | Validation gates, data quality checks, score distribution, backtesting |
+|---|---|---|
+| Fetch | Download BhavCopy CSVs + MTO.DAT files from NSE, parse into stage (OHLCV) + delivery (qty, pct) |
+| Equity Master | Download EQ_MAST.csv → equity_master table (sector, industry) |
+| Enrich | Join stage + delivery, compute rolling volume/delivery avgs → daily table + enriched delivery table |
+| Technical | SMA/EMA, crossovers, trend stage → technical table |
+| Price Level | 252/126/20-day rolling highs/lows, pivot points → price_level table |
+| Momentum | RSI, MACD, Stoch, MFI, ADX, CCI, Williams %R → momentum table |
+| Volatility | ATR, Bollinger Bands, Keltner Channels, historical vol → volatility table |
+| Averages | Rolling means (close, volume, RSI, delivery%, volatility) at 21/63/126/252/756 windows → averages table |
+| Derivatives | NSE FO UDiFF futures data via daily-reports API → futures_data table (basis, OI change) |
+| Score | V2a formula (13 components), delivery value filter, sector-diversified top 20 → scoring_result + scoring_picks |
+| Hits | Forward-return validation → predicted_stock table |
 
 ## Source Conventions
-- `src/data_pipeline/` — Fetch, enrich, volume metrics, technical, price level, momentum, volatility, averages stages
-- `src/scoring/` — Scoring factors, heuristics, backtesting
-- `src/validation/` — Validation gates and orchestration
-- `src/common/` — Shared utilities, DB connection, data models
+- `src/data_pipeline/` — fetcher.py, enricher.py, technical.py, price_level.py, momentum.py, volatility.py, averages.py, derivatives.py
+- `src/scoring/` — scorer.py
+- `src/validation/` — hits_analyzer.py, run_hits.py
+- `db/` — connection.py
+- `config/` — __init__.py, scoring.yaml
+- `data/` — bhavcopy_nse/, delivery_nse/, eq_mast.csv
 - `tests/` — Mirror of src/ structure
-- `data/` — Raw and processed data (gitignored)
-- `config/` — Pipeline configuration files (YAML)
 
 ## Code Conventions
 - Python 3.11+, type hints required for all function signatures
 - Docstrings: Google style
-- Config-driven: all tunable parameters in `config/*.yaml`
-- Async for I/O-bound fetching; synchronous for compute
-- Data model contracts in `src/common/models.py` shared across all agents
-- Validation gates are non-negotiable checkpoints before downstream consumption
+- Config-driven: all tunable parameters in `config/scoring.yaml`
+- All pipeline modules share a logger via `get_logger('runner')`
+- `INSERT OR REPLACE` everywhere — idempotent; `executemany(500 rows)` for batch inserts
+- pandas-ta for all technical indicators; `_safe_rnd()` wrapper for None handling
+- `np.where` with Series: convert `.to_numpy()` first, then `.astype(float)`
+- All numeric values rounded to 2 decimal places at creation
 
 ## Setup
 
@@ -78,7 +81,7 @@ python -m venv .venv
 source .venv/bin/activate
 
 # Install dependencies
-pip install pandas requests numpy pyyaml pandas-ta
+pip install -r requirements.txt
 ```
 
 Dependencies are listed in `requirements.txt` at project root.
@@ -96,13 +99,13 @@ python -m src.runner --stages fetch,enrich,technical --days-back 125
 python -m src.runner --stages fetch --days-back 125 --from-disk-only
 ```
 
-The runner supports these stages in order: `fetch`, `equity_master`, `enrich`, `volume`, `technical`, `price_level`, `momentum`, `volatility`, `averages`, `score`, `hits`.
+The runner supports these stages in order: `fetch`, `equity_master`, `enrich`, `technical`, `price_level`, `momentum`, `volatility`, `averages`, `derivatives`, `score`, `hits`.
 
 ## Quick Validation — Single Symbol, 3 Months
 
 To validate the pipeline with 1 symbol before scaling:
 
 ```bash
-python -m src.runner --stages fetch --days-back 125 --start-date 2026-03-25 --end-date 2026-06-25
+python -m src.runner --stages fetch,enrich,technical,score --days-back 125
 # Then manually verify RELIANCE OHLCV against NSE website / TradingView
 ```

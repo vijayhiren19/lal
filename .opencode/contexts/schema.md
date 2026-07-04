@@ -3,7 +3,7 @@
 ## Overview
 
 | Property | Value |
-|---|---|
+|---|---|---|
 | Engine | SQLite3 |
 | Database file | `mydb1.db` in project root folder |
 | Dates | `TEXT` (ISO `YYYY-MM-DD`) |
@@ -15,26 +15,30 @@
 
 ## Pipeline Flow
 ```
-stage ──(volume metrics)──> daily
-                                │
-            ┌───────────────────┼──────────────────────┐
-            │                   │                      │
-       delivery            technical              price_level
-            │                   │                      │
-            └───────────────────┼──────────────────────┘
-                                │
-                          momentum
-                                │
-                          volatility
-                                │
-                           averages
-                                │
-                         scoring_result
+               stage
+              /     \
+         delivery  daily
+                     │
+           ┌────────┼────────┐
+           │        │        │
+      technical  price_level momentum
+           │        │        │
+           └────────┼────────┘
+                    │
+              volatility
+                    │
+               averages
+                    │
+            futures_data
+                    │
+            scoring_result  ──→ scoring_picks
+                                      │
+                                predicted_stock ──→ scoring_performance
 ```
 
-**Data pipeline stages (8):** Fetch → Enrich → Volume Metrics → Technical → Price Level → Momentum → Volatility → Averages  
-**Scoring stages (2):** Score → Validate  
-**Total: 10 stages**
+**Data pipeline stages (9):** Fetch → Equity Master → Enrich → Technical → Price Level → Momentum → Volatility → Averages → Derivatives  
+**Scoring stages (2):** Score → Hits  
+**Total: 11 stages**
 
 ---
 
@@ -52,7 +56,7 @@ CREATE TABLE stage (
     close_price     REAL    NOT NULL,
     previous_close  REAL    NOT NULL,
     traded_volume   INTEGER NOT NULL,
-    traded_value    REAL    NOT NULL,  -- in crores
+    traded_value    REAL    NOT NULL,  -- Rupees
     day_return_pct  REAL,              -- (close - prev_close) / prev_close * 100
     upper_circuit_hit INTEGER DEFAULT 0,  -- 1 if day_return_pct >= 19.5
     lower_circuit_hit INTEGER DEFAULT 0,  -- 1 if day_return_pct <= -19.5
@@ -366,18 +370,26 @@ Composite scrip scores produced by the Scoring stage. One row per symbol per tra
 
 ```sql
 CREATE TABLE scoring_result (
-    exchange            TEXT    NOT NULL,
-    trade_date          TEXT    NOT NULL,
-    symbol              TEXT    NOT NULL,
-    overall_score       REAL,
-    momentum_score      REAL,
-    value_score         REAL,
-    quality_score       REAL,
-    technical_strength  REAL,
-    volume_liquidity    REAL,
-    heuristic_penalties TEXT,
-    rank                INTEGER,
-    percentile          REAL,
+    exchange                TEXT    NOT NULL,
+    trade_date              TEXT    NOT NULL,
+    symbol                  TEXT    NOT NULL,
+    overall_score           REAL,
+    momentum_score          REAL,
+    value_score             REAL,
+    quality_score           REAL,
+    technical_strength      REAL,
+    volume_liquidity        REAL,
+    institutional_score     REAL,
+    fno_score               REAL,
+    futures_basis_score     REAL,
+    oi_trend_score          REAL,
+    sector_momentum_score   REAL,
+    volatility_score        REAL,
+    confirmation_score      REAL,
+    nifty500_member         INTEGER,
+    heuristic_penalties     TEXT,
+    rank                    INTEGER,
+    percentile              REAL,
     PRIMARY KEY (exchange, trade_date, symbol)
 );
 ```
@@ -386,10 +398,168 @@ CREATE TABLE scoring_result (
 | Column | Description |
 |---|---|
 | `overall_score` | Weighted composite score (0-100) |
-| `momentum_score` / `value_score` / `quality_score` / `technical_strength` / `volume_liquidity` | Per-factor breakdown (0-100) |
+| `momentum_score` / `value_score` / `quality_score` / `technical_strength` / `volume_liquidity` | Core factor breakdown (0-100) |
+| `institutional_score` / `fno_score` / `futures_basis_score` / `oi_trend_score` / `sector_momentum_score` / `volatility_score` / `confirmation_score` | Extended factor breakdown (0-100) |
+| `nifty500_member` | 1 if symbol is Nifty 500 constituent |
 | `heuristic_penalties` | JSON string of per-heuristic penalty adjustments |
 | `rank` | Rank within the symbol universe for the given trade date (1 = best) |
 | `percentile` | Percentile rank (0-100) |
+
+---
+
+## Table: `futures_data`
+FO UDiFF futures data via NSE daily-reports API. One row per symbol per expiry per trade date.
+
+```sql
+CREATE TABLE futures_data (
+    trade_date      TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    expiry_date     TEXT    NOT NULL,
+    futures_open    REAL,
+    futures_high    REAL,
+    futures_low     REAL,
+    futures_close   REAL,
+    futures_oi      INTEGER,
+    futures_oi_chg  INTEGER,
+    futures_volume  INTEGER,
+    spot_price      REAL,
+    basis_pct       REAL,
+    oi_change_pct   REAL,
+    PRIMARY KEY (trade_date, symbol, expiry_date)
+);
+```
+
+### Column Details
+| Column | Description |
+|---|---|
+| `basis_pct` | (futures_close - spot_price) / spot_price × 100 |
+| `oi_change_pct` | (futures_oi_chg / futures_oi) × 100 |
+| `futures_volume` | Total traded volume (aliased, not in PK) |
+
+---
+
+## Table: `scoring_picks`
+Top picks produced by the Scoring stage. Sector-diversified top 20.
+
+```sql
+CREATE TABLE scoring_picks (
+    trade_date      TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    score           REAL,
+    rank            INTEGER,
+    sector          TEXT,
+    PRIMARY KEY (trade_date, symbol)
+);
+```
+
+---
+
+## Table: `scoring_performance`
+Forward-return verification for past picks.
+
+```sql
+CREATE TABLE scoring_performance (
+    pick_date       TEXT    NOT NULL,
+    check_date      TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    entry_price     REAL,
+    exit_price      REAL,
+    return_pct      REAL,
+    PRIMARY KEY (pick_date, check_date, symbol)
+);
+```
+
+---
+
+## Table: `predicted_stock`
+Forward-return validation with multiple targets and windows.
+
+```sql
+CREATE TABLE predicted_stock (
+    pick_date       TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    entry_date      TEXT,
+    entry_price     REAL,
+    tg1_price       REAL,
+    tg1_date        TEXT,
+    tg1_high        REAL,
+    tg1_close       REAL,
+    tg2_price       REAL,
+    tg2_date        TEXT,
+    tg2_high        REAL,
+    tg2_close       REAL,
+    tg3_price       REAL,
+    tg3_date        TEXT,
+    tg3_high        REAL,
+    tg3_close       REAL,
+    window_low      REAL,
+    window_low_date TEXT,
+    window_end_date TEXT,
+    target_hit      INTEGER DEFAULT 0,
+    data_complete   INTEGER DEFAULT 0,
+    PRIMARY KEY (pick_date, symbol)
+);
+```
+
+### Column Details
+| Column | Description |
+|---|---|
+| `entry_price` | open × (1 + slippage_pct/100), or high price if slippage_pct=null |
+| `tg1_price` / `tg2_price` / `tg3_price` | Target prices for 3 levels |
+| `tg1_date` / `tg2_date` / `tg3_date` | First date high reached target (null = not hit) |
+| `target_hit` | 0=none, 1=tg1, 2=tg2, 3=tg3 (hierarchical) |
+
+---
+
+## Table: `shareholding`
+Quarterly shareholding data.
+
+```sql
+CREATE TABLE shareholding (
+    symbol          TEXT    NOT NULL,
+    period          TEXT    NOT NULL,
+    quarter_end     TEXT,
+    quarter_end_int INTEGER,
+    promoter_pct    REAL,
+    fii_pct         REAL,
+    dii_pct         REAL,
+    public_pct      REAL,
+    PRIMARY KEY (symbol, period)
+);
+```
+
+---
+
+## Table: `fno_membership`
+F&O membership with point-in-time validity.
+
+```sql
+CREATE TABLE fno_membership (
+    symbol      TEXT    NOT NULL,
+    valid_from  TEXT    NOT NULL,
+    valid_to    TEXT,
+    PRIMARY KEY (symbol, valid_from)
+);
+```
+
+---
+
+## Table: `index_membership`
+Index and sector membership with point-in-time validity.
+
+```sql
+CREATE TABLE index_membership (
+    symbol      TEXT    NOT NULL,
+    index_name  TEXT    NOT NULL,
+    index_id    INTEGER NOT NULL,
+    valid_from  TEXT    NOT NULL,
+    valid_to    TEXT,
+    weightage   REAL,
+    PRIMARY KEY (symbol, index_name, index_id, valid_from)
+);
+```
+
+20 sector indices mapped to normalized sector names. Nifty 500 = quality gate.
 
 ---
 
@@ -397,18 +567,21 @@ CREATE TABLE scoring_result (
 
 ```sql
 -- Time-series lookups by symbol
-CREATE INDEX idx_daily_sym_date    ON daily      (symbol, trade_date);
-CREATE INDEX idx_delivery_sym_date ON delivery   (symbol, trade_date);
-CREATE INDEX idx_technical_sym_date  ON technical   (symbol, trade_date);
-CREATE INDEX idx_pricelevel_sym_date ON price_level (symbol, trade_date);
-CREATE INDEX idx_momentum_sym_date   ON momentum    (symbol, trade_date);
-CREATE INDEX idx_volatility_sym_date ON volatility  (symbol, trade_date);
+CREATE INDEX idx_stage_sym_date          ON stage         (symbol, trade_date);
+CREATE INDEX idx_daily_sym_date          ON daily         (symbol, trade_date);
+CREATE INDEX idx_delivery_sym_date       ON delivery      (symbol, trade_date);
+CREATE INDEX idx_technical_sym_date      ON technical     (symbol, trade_date);
+CREATE INDEX idx_pricelevel_sym_date     ON price_level   (symbol, trade_date);
+CREATE INDEX idx_momentum_sym_date       ON momentum      (symbol, trade_date);
+CREATE INDEX idx_volatility_sym_date     ON volatility    (symbol, trade_date);
+CREATE INDEX idx_averages_sym_date       ON averages      (symbol, trade_date);
+CREATE INDEX idx_scoring_sym_date        ON scoring_result(symbol, trade_date);
+CREATE INDEX idx_futures_sym_date        ON futures_data  (symbol, trade_date);
 
 -- Date-range queries
-CREATE INDEX idx_daily_date           ON daily      (trade_date);
-CREATE INDEX idx_stage_date           ON stage      (trade_date);
-CREATE INDEX idx_averages_sym_date    ON averages   (symbol, trade_date);
-CREATE INDEX idx_scoring_sym_date     ON scoring_result (symbol, trade_date);
-CREATE INDEX idx_averages_date        ON averages   (trade_date);
-CREATE INDEX idx_scoring_date         ON scoring_result (trade_date);
+CREATE INDEX idx_stage_date              ON stage         (trade_date);
+CREATE INDEX idx_daily_date              ON daily         (trade_date);
+CREATE INDEX idx_averages_date           ON averages      (trade_date);
+CREATE INDEX idx_scoring_date            ON scoring_result(trade_date);
+CREATE INDEX idx_futures_date            ON futures_data  (trade_date);
 ```

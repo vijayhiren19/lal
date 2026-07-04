@@ -29,6 +29,8 @@ Before wiring up the full pipeline, run this standalone check:
 
 All stages accept `--days-back N` — start with `--days-back 125` (~6 months).
 
+> **Note:** Volume metrics (rolling volume averages, vol_ratio, vol_breakout_up, vol_trend_5d, volume_score) are computed in the Enrich stage (`enricher.py`), not a separate stage.
+
 ---
 
 ## Execution Model
@@ -106,22 +108,20 @@ else:
 ### Key Considerations
 - Use the local file cache first — download from NSE only when the file doesn't exist on disk
 - For NSE-specific download details (URLs, file naming, cache logic, session management, column mappings, and error handling), see `stage-loading.skill.md`
-- Maintain a symbol master list in `config/symbols.yaml`
-- Handle stock splits and bonuses via corporate actions endpoint
 
 ---
 
 ## Enrich Stage
-- Add fundamental data: market cap, sector, industry, PE ratio, PB ratio
-- Add derived fields: delivery percentage, traded value, F&O status
-- Merge index membership (Nifty50, Midcap, Smallcap)
+- Join stage + delivery, merge index membership, compute volume rolling averages/averages/breakouts/score
+- Compute delivery rolling averages (qty_5d_avg, qty_20d_avg, pct_5d_avg, pct_20d_avg, pct_trend, vol_spike)
+- Output: daily table (OHLCV + volume metrics) + enriched delivery table
 - Module: `src/data_pipeline/enricher.py`
 
 ---
 
-## Volume Metrics Stage
+## Volume Metrics (within Enrich Stage)
 
-**Location:** Between `stage` and `daily` enrichment. Computed from `traded_volume` in the `stage` table.
+Volume metrics are computed inside `enricher.py` as part of the daily table creation.
 
 | Metric | Formula | Purpose |
 |---|---|---|
@@ -134,8 +134,6 @@ else:
 | `volume_score` | Composite (0-100) from vol_ratio, trend, breakout | Overall volume quality |
 
 **Precision:** All values `round(..., 2)` except `vol_breakout_up` (INTEGER) and `traded_volume` (INTEGER).
-
-Module: `src/data_pipeline/volume.py`
 
 ---
 
@@ -443,8 +441,6 @@ See `scoring.skill.md` for full analysis and rejected alternatives.
 ## Common Patterns
 - Always validate input data shape before processing
 - Log stage entry/exit with row counts and time taken
-- Raise `DataQualityError` (from `src/common/exceptions.py`) on bad data
-- All stages return a `PipelineDataFrame` (Pydantic model wrapping a DataFrame)
 - Round ALL numeric outputs to 2 decimal places at the point of creation — never trust pandas-ta defaults
 - Heavy reads are expected — read entire table at once, filter and process in pandas
 - Time per stage is acceptable — no query-level performance optimization needed

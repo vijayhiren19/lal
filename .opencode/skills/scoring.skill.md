@@ -26,39 +26,75 @@ Build the scoring formula incrementally. Do NOT implement all 13 components at o
 
 The scoring system is a **delivery-quality + contrarian + liquidity** composite. It identifies 20 stocks (sector-diversified) with strong delivery metrics and pullback entry points that tend to outperform over 10-20 trading days.
 
-### Research-Backed Formula
+### Research-Backed Formula — 13-Component V2a
 
-Derived from reverse-engineering 712K rows of historical data across 365 trading days:
+All weights from `config/scoring.yaml`. Pseudocode:
 
 ```python
-def score_top20(df):
-    # 1. Contrarian entry: reward recent pullbacks
-    neg_ret = df['day_return_pct'].fillna(0) < 0
-    score = np.where(neg_ret, df['day_return_pct'].fillna(0).abs() * 1.5, 0)
+# 1. Contrarian entry (momentum_score, weight ~10-15%)
+contrarian = abs(day_return_pct) * value_return_weight  IF day_return_pct < 0
+             ELSE 0
+clip to [0, 50]
 
-    # 2. High delivery % (accumulation)
-    score += (df['pct'].fillna(0) >= 60).astype(float) * 15
+# 2. High delivery % (value_score, weight ~15-20%)
+value_score = delivery_pct_boost (15)  IF pct >= delivery_pct_threshold (60)
+              ELSE 0
 
-    # 3. Rising delivery trend (increasing over 5 days)
-    score += (df['pct_trend'].fillna(0) >= 0.5).astype(float) * 10
+# 3. Rising delivery trend (quality_score, weight ~10-15%)
+quality_score = pct_trend_boost (10)  IF pct_trend >= pct_trend_threshold (0.5)
+               ELSE 0
 
-    # 4. Delivery quantity surge (vs 20-day average)
-    score += (df['delivery_qty_ratio'].fillna(0) >= 1.5).astype(float) * 10
+# 4. Delivery qty surge (technical_strength, weight ~10-15%)
+ratio = qty / qty_20d_avg
+technical_strength = delivery_qty_boost (10)  IF ratio >= delivery_qty_ratio_threshold (1.5)
+                    ELSE 0
 
-    # 5. Size/liquidity screen (market cap proxy)
-    score += df['traded_value'].rank(pct=True) * 15
+# 5. Size / liquidity (volume_liquidity, weight ~15-20%)
+mcap_tier = quartile of traded_value rank
+tier_liq = traded_value rank within mcap_tier (percentile)
+volume_liquidity = tier_liq * liquidity_percentile_weight (15)
 
-    # 6. Institutional accumulation (FII + DII 4Q change)
-    sm_delta = df['smart_money_delta'].fillna(0)
-    score += np.where(sm_delta > 2, np.clip(sm_delta * 3, 0, 15), 0)
+# 6. Institutional accumulation (institutional_score, weight ~10-15%)
+smart_money_delta = (fii_pct - prev_fii_pct) + (dii_pct - prev_dii_pct) (4Q apart)
+institutional_score = min(delta * institutional_scale_factor, institutional_max_boost)
+                     IF delta > institutional_delta_threshold (2.0)
+                     ELSE 0
 
-    # 7. F&O membership boost (+3 for derivatives-active)
-    score += df['is_fno'].fillna(0).to_numpy().astype(float) * 3
+# 7. F&O membership (fno_score, weight ~3-5%)
+fno_score = fno_boost (3)  IF symbol in fno_membership (PIT at trade_date)
+           ELSE 0
 
-    # 8. Nifty 500 quality flag (+2 for index constituents)
-    score += df['is_nifty500'].fillna(0).to_numpy().astype(float) * 2
+# 8. Nifty 500 membership (nifty500_score, weight ~2-3%)
+nifty500_score = nifty500_boost (2)  IF symbol in Nifty 500 (PIT)
+               ELSE 0
 
-    return score.clip(0, 100)
+# 9. Futures basis (futures_basis_score, weight ~3-5%)
+futures_basis_score = min(basis_pct * 2, futures_basis_boost (5))
+                     IF basis_pct > futures_basis_threshold (0.0)
+                     ELSE 0
+
+# 10. OI trend (oi_trend_score, weight ~3-5%)
+oi_trend_score = oi_trend_boost (5)  IF oi_change_pct > oi_trend_threshold (5.0) AND day_return > 0
+                ELSE 0
+
+# 11. Sector-relative momentum (sector_momentum_score, weight ~3-5%)
+sector_mean_return = groupby('sector')['day_return_pct'].mean()
+sector_relative = day_return_pct - sector_mean_return
+sector_momentum_score = percentile_rank(sector_relative) * sector_momentum_boost (5)
+
+# 12. Volatility filter (volatility_score, weight ~3-5%)
+atr_pctile = percentile_rank(atr_pct)
+volatility_score = (1 - atr_pctile) * volatility_penalty (5)
+
+# 13. Multi-indicator confirmation (confirmation_score, weight ~2-3%)
+confirmed = (50 < rsi_14 < 70) AND (adx_14 > 25) AND (macd_histogram > 0)
+confirmation_score = confirmed * confirmation_boost (3)
+
+# Overall (clipped to 0-100)
+overall_score = momentum_score + value_score + quality_score + technical_strength
+              + volume_liquidity + institutional_score + fno_score + nifty500_score
+              + futures_basis_score + oi_trend_score + sector_momentum_score
+              + volatility_score + confirmation_score
 ```
 
 ### Backtest Results (2025-07 to 2026-05, top-30 historical)
@@ -338,22 +374,27 @@ python -m src.runner --stages hits --start-date 2026-05-01 --end-date 2026-05-31
 
 ### Scorer (`src/scoring/scorer.py`)
 
-The scorer implements V2a formula directly — no heuristics, no factor weights:
+The scorer implements the 13-component V2a formula:
 
-1. **Data loading** — 7-table merge (daily, delivery, technical, momentum, volatility, price_level, stage)
+1. **Data loading** — Merge from daily, delivery, stage, shareholding, futures_data, momentum, volatility, and sector (index_membership → equity_master fallback)
 2. **Equity filter** — ISIN prefix filter (`isin.startswith('INE')`)
-3. **Delivery value filter** — computes `dev_traded_value = delivery.qty × daily.close_price`, filters stocks below `min_dev_trade_value_cr` (default 0.5 Cr). Ensures delivery signals are based on meaningful institutional activity, not penny stocks with negligible absolute delivery
+3. **Delivery value filter** — computes `dev_traded_value = delivery.qty × daily.close_price`, filters stocks below `min_dev_trade_value_cr` (default 0.5 Cr)
 4. **Feature computation** — Adds `delivery_qty_ratio` from `delivery.qty / delivery.qty_20d_avg`
-4. **Score computation** — `_compute_v2a_score()` computes 8 components with binary/direct scoring:
-   - `momentum_score` = contrarian: `abs(day_return_pct) * 1.5` if negative, else 0 (capped at 50)
-   - `value_score` = delivery pct ≥ 60%? 15 : 0
-   - `quality_score` = pct_trend ≥ 0.5? 10 : 0
-   - `technical_strength` = delivery_qty_ratio ≥ 1.5? 10 : 0
-   - `volume_liquidity` = traded_value percentile rank × 15
-    - `institutional_score` = smart_money_delta × 3.0 if delta > 2%, capped at 15 (4Q FII+DII change from shareholding table)
-    - `fno_score` = is_fno? fno_boost (3) : 0 (F&O membership from fno_membership table)
-    - `nifty500_score` = is_nifty500? nifty500_boost (2) : 0 (Nifty 500 membership from index_membership table)
-    - `overall_score` = sum of all 8 (capped 0-100)
+4. **Score computation** — `_compute_v2a_score()` computes 13 components with binary/direct scoring (all weights from `config/scoring.yaml`):
+   - `momentum_score` = contrarian: `abs(day_return_pct) * value_return_weight` if negative, else 0 (capped at 50)
+   - `value_score` = delivery pct ≥ `delivery_pct_threshold`? `delivery_pct_boost` : 0
+   - `quality_score` = pct_trend ≥ `pct_trend_threshold`? `pct_trend_boost` : 0
+   - `technical_strength` = delivery_qty_ratio ≥ `delivery_qty_ratio_threshold`? `delivery_qty_boost` : 0
+   - `volume_liquidity` = mcap tier percentile × `liquidity_percentile_weight`
+   - `institutional_score` = smart_money_delta × `institutional_scale_factor` if delta > `institutional_delta_threshold`, capped at `institutional_max_boost`
+   - `fno_score` = is_fno? `fno_boost` : 0
+   - `nifty500_score` = is_nifty500? `nifty500_boost` : 0
+   - `futures_basis_score` = min(basis_pct × 2, `futures_basis_boost`) if basis_pct > `futures_basis_threshold`
+   - `oi_trend_score` = `oi_trend_boost` if oi_change_pct > `oi_trend_threshold` AND day_return > 0
+   - `sector_momentum_score` = percentile_rank(sector_relative_return) × `sector_momentum_boost`
+   - `volatility_score` = (1 - atr_pctile) × `volatility_penalty`
+   - `confirmation_score` = confirmed_macd_adx_rsi? `confirmation_boost` : 0
+   - `overall_score` = sum of all 13 (capped 0-100)
 5. **Shareholding data** — `_load_shareholding()` queries the `shareholding` table (from `nse-historical-membership` repo) for point-in-time FII/DII % at most recent quarter-end. Computes `smart_money_delta = fii_d4q + dii_d4q` (4-quarter change). Merged into the main DataFrame for scoring.
 6. **Sector diversification** — `_save_picks()` loads sectors from `index_membership` (20 sector indices, PIT accurate, 1,313 symbols) first, falls back to `equity_master` for remaining symbols, then sorts by score descending, picks top `top_n` but skips sectors that already have `max_per_sector` picks
 6. **Paper trading** — saves picks to `scoring_picks`; `_verify_past_picks()` checks all past picks whose `lookahead_days` have elapsed, computes forward return from `daily.close_price`, and `INSERT OR IGNORE`s into `scoring_performance`
@@ -374,8 +415,8 @@ Stages after `averages`:
 
 ```python
 STAGE_ORDER = [
-    "fetch", "equity_master", "enrich", "volume", "technical",
-    "price_level", "momentum", "volatility", "averages", "score",
+    "fetch", "equity_master", "enrich", "technical", "price_level",
+    "momentum", "volatility", "averages", "derivatives", "score",
     "hits",
 ]
 ```
@@ -428,23 +469,30 @@ CREATE TABLE IF NOT EXISTS scoring_performance (
 
 ```yaml
 scoring:
-  top_n: 20
-  max_per_sector: 5
-  lookahead_days: 10
-  min_dev_trade_value_cr: 0.5          # filter: min delivery traded value in Cr
-  delivery_pct_threshold: 60
-  pct_trend_threshold: 0.5
-  delivery_qty_ratio_threshold: 1.5
-  value_return_weight: 1.5
+  confirmation_boost: 3
   delivery_pct_boost: 15
-  pct_trend_boost: 10
+  delivery_pct_threshold: 60
   delivery_qty_boost: 10
-  liquidity_percentile_weight: 15
-  institutional_max_boost: 15
+  delivery_qty_ratio_threshold: 1.5
+  fno_boost: 3
+  futures_basis_boost: 5
+  futures_basis_threshold: 0.0
   institutional_delta_threshold: 2.0
+  institutional_max_boost: 15
   institutional_scale_factor: 3.0
-  fno_boost: 3                        # F&O membership bonus (fno_membership table)
-  nifty500_boost: 2                   # Nifty 500 quality bonus (index_membership table)
+  liquidity_percentile_weight: 15
+  lookahead_days: 10
+  max_per_sector: 5
+  min_dev_trade_value_cr: 0.5
+  nifty500_boost: 2
+  oi_trend_boost: 5
+  oi_trend_threshold: 5.0
+  pct_trend_boost: 10
+  pct_trend_threshold: 0.5
+  sector_momentum_boost: 5
+  top_n: 20
+  value_return_weight: 1.5
+  volatility_penalty: 5
 ```
 
 ## Data Sources Used
