@@ -41,11 +41,11 @@ value_score = delivery_pct_boost (15)  IF pct >= delivery_pct_threshold (60)
               ELSE 0
 
 # 3. Rising delivery trend (quality_score, weight ~10-15%)
-quality_score = pct_trend_boost (10)  IF pct_trend >= pct_trend_threshold (0.5)
+quality_score = pct_trend_boost (10)  IF delivery_pct_trend >= pct_trend_threshold (0.5)
                ELSE 0
 
 # 4. Delivery qty surge (technical_strength, weight ~10-15%)
-ratio = qty / qty_20d_avg
+ratio = delivery_volume / delivery_qty_20d_avg
 technical_strength = delivery_qty_boost (10)  IF ratio >= delivery_qty_ratio_threshold (1.5)
                     ELSE 0
 
@@ -121,7 +121,7 @@ Only features with positive 20-day IC are used:
 | vol_ratio | +0.035 | 1.06 | 1.04 | Volume surge |
 | atr_pct | +0.034 | 4.9% | 4.6% | Volatility |
 | **delivery_qty_ratio** | **+0.025** | **1.07** | **1.03** | **Delivery surge** |
-| pct_trend | +0.004 | 0.01 | -0.00 | Delivery trend |
+| delivery_pct_trend | +0.004 | 0.01 | -0.00 | Delivery trend |
 | day_return_pct | **-0.007** | 0.3 | 0.1 | Pullback signal |
 
 Negative IC features excluded: cum_return_3d (-0.027), cum_return_5d (-0.042).
@@ -177,7 +177,7 @@ boost = np.where(cond, 15.0, 0.0).astype(float)
 ### None-safe comparisons
 Use `pd.to_numeric(col, errors='coerce')` before comparison:
 ```python
-pct_trend = pd.to_numeric(df["pct_trend"], errors="coerce")
+pct_trend = pd.to_numeric(df["delivery_pct_trend"], errors="coerce")
 cond = pct_trend >= 0.5
 ```
 
@@ -379,7 +379,7 @@ The scorer implements the 13-component V2a formula:
 1. **Data loading** — Merge from daily, delivery, stage, shareholding, futures_data, momentum, volatility, and sector (index_membership → equity_master fallback)
 2. **Equity filter** — ISIN prefix filter (`isin.startswith('INE')`)
 3. **Delivery value filter** — computes `dev_traded_value = delivery.qty × daily.close_price`, filters stocks below `min_dev_trade_value_cr` (default 0.5 Cr)
-4. **Feature computation** — Adds `delivery_qty_ratio` from `delivery.qty / delivery.qty_20d_avg`
+4. **Feature computation** — Adds `delivery_qty_ratio` from `delivery_volume / delivery_qty_20d_avg`
 4. **Score computation** — `_compute_v2a_score()` computes 13 components with binary/direct scoring (all weights from `config/scoring.yaml`):
    - `momentum_score` = contrarian: `abs(day_return_pct) * value_return_weight` if negative, else 0 (capped at 50)
    - `value_score` = delivery pct ≥ `delivery_pct_threshold`? `delivery_pct_boost` : 0
@@ -501,8 +501,8 @@ scoring:
 |---------|-------|--------|-------------|
 | day_return_pct | stage | day_return_pct | (close - prev_close) / prev_close × 100 |
 | pct (delivery %) | delivery | pct | Delivery quantity / traded quantity × 100 |
-| pct_trend | delivery | pct_trend | Linear slope of pct over 5 sessions |
-| delivery_qty_ratio | delivery | qty, qty_20d_avg | qty / qty_20d_avg |
+| delivery_pct_trend | daily | delivery_pct_trend | Linear slope of delivery_pct over 5 sessions |
+| delivery_qty_ratio | daily | delivery_volume, delivery_qty_20d_avg | delivery_volume / delivery_qty_20d_avg |
 | traded_value | daily | traded_value | Total traded value in rupees |
 | smart_money_delta | shareholding | fii_pct, dii_pct | (fii_current - fii_4q_ago) + (dii_current - dii_4q_ago) |
 | is_fno | fno_membership | valid_from, valid_to | valid_from ≤ trade_date AND (valid_to IS NULL OR valid_to > trade_date) |
@@ -524,5 +524,5 @@ Rebuild any data source by running the corresponding script: `.venv\Scripts\pyth
 - `config/scoring.yaml` — weights, thresholds, and boost parameters
 - Backtest method: score each month-end, pick top 20, measure forward N-day return
 - Grid search over 2,000+ parameter combinations to identify optimal thresholds
-- Key finding: delivery pct ≥ 60% and pct_trend ≥ 0.5 are the strongest threshold values
+- Key finding: delivery pct ≥ 60% and delivery_pct_trend ≥ 0.5 are the strongest threshold values
 - Files: `backtest_results_full.csv`, `backtest_buckets.csv`

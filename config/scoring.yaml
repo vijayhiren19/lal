@@ -1,0 +1,39 @@
+scoring:
+  confirmation_boost: 3
+  delivery_pct_boost: 15
+  delivery_pct_threshold: 60
+  delivery_qty_boost: 10
+  delivery_qty_ratio_threshold: 1.5
+  fno_boost: 3
+  futures_basis_boost: 5
+  futures_basis_threshold: 0.0
+  institutional_delta_threshold: 2.0
+  institutional_max_boost: 15
+  institutional_scale_factor: 3.0
+  liquidity_percentile_weight: 15
+  lookahead_days: 10
+  max_per_sector: 5
+  min_dev_trade_value_cr: 0.5
+  nifty500_boost: 2
+  oi_trend_boost: 5
+  oi_trend_threshold: 5.0
+  pct_trend_boost: 10
+  pct_trend_threshold: 0.5
+  sector_momentum_boost: 5
+  top_n: 20
+  value_return_weight: 1.5
+  volatility_penalty: 5
+hit_analysis:
+  entry_modes:
+    - name: open_p3
+      slippage_pct: 3
+    - name: high_val
+      slippage_pct: null
+  targets:
+    - name: target1
+      pct: 4
+    - name: target2
+      pct: 5
+    - name: target3
+      pct: 10
+  windows: [5, 10, 15]

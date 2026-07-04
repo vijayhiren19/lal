@@ -113,7 +113,7 @@ else:
 
 ## Enrich Stage
 - Join stage + delivery, merge index membership, compute volume rolling averages/averages/breakouts/score
-- Compute delivery rolling averages (qty_5d_avg, qty_20d_avg, pct_5d_avg, pct_20d_avg, pct_trend, vol_spike)
+- Compute delivery rolling averages (delivery_qty_5d_avg, delivery_qty_20d_avg, delivery_pct_5d_avg, delivery_pct_20d_avg, delivery_pct_trend, vol_spike)
 - Output: daily table (OHLCV + volume metrics) + enriched delivery table
 - Module: `src/data_pipeline/enricher.py`
 
@@ -422,8 +422,8 @@ score = np.where(neg_ret, df['day_return_pct'].fillna(0).abs() * 1.5, 0)
 # 2. High delivery % (> 60% = strong hands)
 score += (df['pct'].fillna(0) >= 60).astype(float) * 15
 
-# 3. Rising delivery trend (pct_trend >= 0.5)
-score += (df['pct_trend'].fillna(0) >= 0.5).astype(float) * 10
+# 3. Rising delivery trend (delivery_pct_trend >= 0.5)
+score += (df['delivery_pct_trend'].fillna(0) >= 0.5).astype(float) * 10
 
 # 4. Delivery quantity surge (qty > 1.5x 20d avg)
 score += (df['delivery_qty_ratio'].fillna(0) >= 1.5).astype(float) * 10

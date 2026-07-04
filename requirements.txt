@@ -1,0 +1,7 @@
+pyyaml>=6.0
+pandas>=2.0
+pandas-ta==0.4.71b0
+requests>=2.31
+numpy>=1.24
+flask>=3.0
+brotli>=1.2

@@ -13,6 +13,7 @@ Follow the **markdown-driven development** pattern:
 | File | Role |
 |------|------|
 | `AGENTS.md` | **Technical specification** — pipeline, DB schema, scoring formula, CLI |
+| `.opencode/context/schema.md` | **Database schema reference** — all table definitions in one place |
 | `.opencode/skills/*.skill.md` | Implementation patterns and conventions (generated later) |
 | `information.md` | **This file** — development workflow and process guide |
 | `README.md` | Project overview and quick start |
