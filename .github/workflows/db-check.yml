@@ -1,0 +1,23 @@
+name: Database Health Check
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Runs at minute 0 past every 6th hour
+  workflow_dispatch: # Allows you to trigger the check manually
+
+jobs:
+  log-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Insert health check record
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          # Reference: How to create the table if it doesn't exist yet:
+          # CREATE TABLE health_check (
+          #     checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          # );
+
+          echo "Connecting to database and logging health check..."
+          psql "$DATABASE_URL" -c "INSERT INTO health_check DEFAULT VALUES;"
+          echo "✅ Health check record inserted successfully!"
